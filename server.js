@@ -391,8 +391,45 @@ async function proxyJson(endpoint, payload) {
   return data;
 }
 
+function newsCardItem(item) {
+  return {
+    id: item.id,
+    title: item.title,
+    subheadline: item.subheadline || '',
+    description: item.description || '',
+    link: item.link || '',
+    image: item.image || categoryFallback(item.category),
+    fallbackImage: item.fallbackImage || categoryFallback(item.category),
+    imageIsFallback: !!item.imageIsFallback,
+    video: item.video || '',
+    source: item.source || 'THE VOICE REPORTER',
+    sourceAttribution: item.sourceAttribution || '',
+    author: item.author || '',
+    region: item.region || '',
+    category: item.category || 'News',
+    publishedAt: item.publishedAt || item.updatedAt || now(),
+    updatedAt: item.updatedAt || '',
+    editorial: !!item.editorial,
+    status: item.status || 'published',
+    isBreaking: !!item.isBreaking,
+    isDeveloping: !!item.isDeveloping,
+    isUpdated: !!item.isUpdated,
+    featured: !!item.featured,
+    slug: item.slug || ''
+  };
+}
+function publicNewsPayload(limit=180) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 180, 1), 300);
+  return {
+    ok: true,
+    updatedAt: cache.updatedAt ? new Date(cache.updatedAt).toISOString() : null,
+    items: cache.items.slice(0, safeLimit).map(newsCardItem),
+    sources: cache.sources || {}
+  };
+}
 app.get('/api/config', (_req, res) => res.json({ ok: true, settings: store.settings }));
-app.get('/api/news', (_req, res) => res.json({ ok: true, updatedAt: cache.updatedAt ? new Date(cache.updatedAt).toISOString() : null, items: cache.items, sources: cache.sources }));
+app.get('/api/news', (req, res) => res.json(publicNewsPayload(req.query.limit)));
+app.get('/api/news-lite', (req, res) => res.json(publicNewsPayload(req.query.limit)));
 app.post('/api/refresh', async (req, res) => { try { const c = await refreshNews(); res.json({ ok: true, updatedAt: new Date(c.updatedAt).toISOString(), stories: c.items.length, sources: c.sources }); } catch (e) { res.status(500).json({ ok: false, error: e.message }); } });
 app.get('/api/health', async (_req, res) => {
   let proxyReachable = false;
@@ -586,8 +623,9 @@ app.get('/writer/dashboard', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, '
 app.use(express.static(PUBLIC_DIR, { extensions: ['html'] }));
 
 async function boot() {
-  try { await refreshNews(); } catch (e) { console.error('[boot news]', e.message); }
-  setInterval(() => refreshNews().catch(e => console.error('[refresh]', e.message)), 60 * 1000);
+  cache = { updatedAt: Date.now(), items: publicStories(), sources: {} };
   app.listen(PORT, '0.0.0.0', () => console.log(`THE VOICE REPORTER running on 0.0.0.0:${PORT}`));
+  refreshNews().catch(e => console.error('[boot news]', e.message));
+  setInterval(() => refreshNews().catch(e => console.error('[refresh]', e.message)), 60 * 1000);
 }
 boot().catch(e => { console.error(e); process.exit(1); });
