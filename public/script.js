@@ -112,7 +112,7 @@ function renderHero(item) {
       <span class="eyebrow">${escapeHtml(item.category)} · ${escapeHtml(item.source)}</span>
       <h1>${escapeHtml(item.title)}</h1>
       <p>${escapeHtml(item.description || "Read the full report from the original publisher.")}</p>
-      <a class="read-link" href="${safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">Read full story ↗</a>
+      <a class="read-link" href="${articleUrl(item.link)}" target="_blank" rel="noopener noreferrer">Read full story →</a>
     </div>`;
 }
 
@@ -123,7 +123,7 @@ function renderSide(items) {
       ${imageBlock(item.image, "thumb")}
       <div>
         <span>${escapeHtml(item.category)} · ${escapeHtml(item.source)}</span>
-        <h3><a href="${safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h3>
+        <h3><a href="${articleUrl(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h3>
       </div>
     </article>`).join("");
 }
@@ -142,7 +142,7 @@ function renderTrending(items) {
   root.innerHTML = items.map((item, i) => `
     <article class="trend-item">
       <div class="trend-num">0${i + 1}</div>
-      <h4><a href="${safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h4>
+      <h4><a href="${articleUrl(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h4>
       <small>${escapeHtml(item.source)} · ${formatTime(item.publishedAt)}</small>
     </article>`).join("");
 }
@@ -162,7 +162,7 @@ function renderSearch(q) {
   }
   const matches = state.news.filter(n => `${n.title} ${n.description} ${n.source} ${n.category}`.toLowerCase().includes(q)).slice(0, 12);
   root.innerHTML = matches.map(item => `
-    <a class="search-item" href="${safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">
+    <a class="search-item" href="${articleUrl(item.link)}" target="_blank" rel="noopener noreferrer">
       <strong>${escapeHtml(item.title)}</strong>
       <small>${escapeHtml(item.category)} · ${escapeHtml(item.source)} · ${formatTime(item.publishedAt)}</small>
     </a>`).join("") || `<div class="search-item">No matching live stories.</div>`;
@@ -193,10 +193,10 @@ function cardHtml(item) {
       ${imageBlock(item.image, "news-image")}
       <div class="news-card-body">
         <div class="meta">${escapeHtml(item.category)} · ${escapeHtml(item.source)}</div>
-        <h3><a href="${safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h3>
+        <h3><a href="${articleUrl(item.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h3>
         <p>${escapeHtml(item.description || "")}</p>
         <div class="byline">${formatTime(item.publishedAt)}</div>
-        <a class="read-link" href="${safeUrl(item.link)}" target="_blank" rel="noopener noreferrer">Read at source ↗</a>
+        <a class="read-link" href="${articleUrl(item.link)}" target="_blank" rel="noopener noreferrer">Read full story →</a>
       </div>
     </article>`;
 }
@@ -210,6 +210,10 @@ function formatTime(value) {
   const d = value ? new Date(value) : null;
   if (!d || Number.isNaN(d.getTime())) return "Latest";
   return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function articleUrl(value) {
+  return "/article?url=" + encodeURIComponent(String(value || ""));
 }
 
 function safeUrl(value) {
