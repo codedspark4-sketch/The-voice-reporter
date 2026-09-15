@@ -1,42 +1,41 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0b1020">
   <meta name="description" content="THE VOICE REPORTER — live Nigerian, African and world news.">
+  <meta name="theme-color" content="#0b1020">
   <title>THE VOICE REPORTER</title>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body data-theme="light">
-  <a class="skip-link" href="#mainContent">Skip to content</a>
+<body>
+  <a class="skip-link" href="#latest">Skip to latest news</a>
 
   <header class="site-header">
-    <div class="container header-main">
+    <div class="container header-row">
       <a class="brand" href="/" aria-label="THE VOICE REPORTER home">
         <span class="brand-mark">V</span>
-        <span class="brand-copy">
-          <strong>THE VOICE REPORTER</strong>
-          <small>REAL NEWS • NIGERIA • AFRICA • WORLD</small>
+        <span class="brand-text">
+          <strong id="brandTitle">THE VOICE REPORTER</strong>
+          <small id="brandTagline">REAL NEWS • NIGERIA • WORLD</small>
         </span>
       </a>
 
       <nav class="desktop-nav" aria-label="Primary navigation">
-        <a class="active" href="#latest">Latest</a>
+        <a href="#latest" class="active">Latest</a>
         <a href="#nigeria">Nigeria</a>
         <a href="#politics">Politics</a>
         <a href="#business">Business</a>
         <a href="#technology">Technology</a>
         <a href="#sports">Sports</a>
         <a href="#world">World</a>
+        <a href="#mostReported">Most Reported</a>
       </nav>
 
-      <div class="header-tools">
-        <button id="searchBtn" class="header-btn" type="button" aria-label="Open search">⌕</button>
-        <button id="themeBtn" class="header-btn theme-btn" type="button" aria-label="Switch to night mode" title="Switch theme">
-          <span id="themeIcon" aria-hidden="true">☾</span>
-        </button>
-        <button id="menuBtn" class="header-btn menu-btn" type="button" aria-label="Open menu" aria-expanded="false">☰</button>
+      <div class="header-actions">
+        <button id="searchBtn" class="icon-btn" type="button" aria-label="Search" title="Search">⌕</button>
+        <button id="themeBtn" class="icon-btn" type="button" aria-label="Switch theme" title="Switch theme"><span id="themeIcon">☾</span></button>
+        <button id="menuBtn" class="icon-btn menu-btn" type="button" aria-expanded="false" aria-controls="mobileNav" aria-label="Open menu">☰</button>
       </div>
     </div>
 
@@ -48,60 +47,46 @@
       <a href="#technology">Technology</a>
       <a href="#sports">Sports</a>
       <a href="#world">World</a>
-      <a href="#newsDesk">AI News Desk</a>
+      <a href="#mostReported">Most Reported</a>
+      <a href="#newsdesk">AI News Desk</a>
     </nav>
   </header>
 
-  <section class="breaking-bar" aria-label="Breaking news">
+  <section id="breakingBar" class="breaking-bar" aria-label="Breaking news">
     <div class="container breaking-inner">
-      <span class="breaking-label"><span class="live-dot"></span> BREAKING</span>
-      <div class="ticker-viewport" aria-live="polite">
-        <div id="tickerTrack" class="ticker-track">
-          <span>Connecting to live news…</span>
-        </div>
+      <div class="breaking-label"><span class="live-dot"></span> BREAKING</div>
+      <div class="ticker-viewport">
+        <div id="tickerTrack" class="ticker-track"><span>Connecting to live news…</span></div>
       </div>
-      <span id="updatedAt" class="updated-at">Updating…</span>
+      <div id="updatedAt" class="updated-at">Updating…</div>
     </div>
   </section>
 
   <section id="searchPanel" class="search-panel" aria-label="Search">
     <div class="container search-inner">
-      <label class="search-box">
-        <span aria-hidden="true">⌕</span>
+      <div class="search-box">
+        <span>⌕</span>
         <input id="searchInput" type="search" placeholder="Search THE VOICE REPORTER…" autocomplete="off">
-      </label>
+      </div>
       <div id="searchResults" class="search-results"></div>
     </div>
   </section>
 
-  <main id="mainContent" class="container main-content">
-    <section class="hero-layout" aria-label="Top news">
-      <article id="heroStory" class="hero-story">
-        <div class="hero-media placeholder-art"><span>THE VOICE REPORTER</span></div>
-        <div class="hero-body">
-          <div class="story-meta">LIVE NEWS</div>
-          <h1>Loading the latest headline…</h1>
-          <p>Connecting to the live newsroom.</p>
+  <main class="container main">
+    <section class="hero-grid" aria-label="Top stories">
+      <article id="heroStory" class="hero-card"></article>
+      <aside class="top-stories">
+        <div class="section-mini">
+          <span class="eyebrow">TOP STORIES</span>
+          <h2>What matters now</h2>
         </div>
-      </article>
-
-      <aside class="top-rail" aria-label="Top stories">
-        <div class="rail-heading">
-          <div>
-            <span class="eyebrow">TOP STORIES</span>
-            <h2>What matters now</h2>
-          </div>
-        </div>
-        <div id="sideStories" class="top-story-list"></div>
+        <div id="sideStories" class="side-story-list"></div>
       </aside>
     </section>
 
-    <section id="latest" class="news-section">
-      <div class="section-header">
-        <div>
-          <span class="eyebrow">LIVE STREAM</span>
-          <h2>Latest News</h2>
-        </div>
+    <section id="latest" class="section">
+      <div class="section-heading">
+        <div><span class="eyebrow">LIVE STREAM</span><h2>Latest News</h2></div>
         <button id="refreshBtn" class="secondary-btn" type="button">Refresh</button>
       </div>
 
@@ -110,120 +95,94 @@
 
         <aside class="sidebar">
           <div class="side-card">
-            <div class="card-heading">
-              <span class="eyebrow">TRENDING</span>
-              <h3>Most read right now</h3>
-            </div>
+            <span class="eyebrow">TRENDING</span>
+            <h3>What’s moving</h3>
             <div id="trendingList" class="trending-list"></div>
           </div>
 
           <div class="side-card">
-            <div class="card-heading">
-              <span class="eyebrow">NEWS DESK</span>
-              <h3>Live source status</h3>
-            </div>
-            <p class="side-copy">Headlines refresh automatically from the newsroom source list.</p>
-            <div id="sourceStatus" class="source-status">Checking sources…</div>
+            <span class="eyebrow">LIVE SOURCES</span>
+            <h3>News desk status</h3>
+            <p class="muted">Built-in feeds and editorial stories are merged into one newsroom stream.</p>
+            <div id="sourceStatus" class="accent-text">Checking sources…</div>
           </div>
         </aside>
       </div>
     </section>
 
-    <section id="nigeria" class="news-section category-section">
-      <div class="section-header">
-        <div><span class="eyebrow">NIGERIA NOW</span><h2>Nigeria</h2></div>
-        <a class="section-link" href="#nigeria">View all</a>
-      </div>
-      <div id="nigeriaGrid" class="news-grid four-up"></div>
+    <section id="nigeria" class="section category-section">
+      <div class="section-heading"><div><span class="eyebrow">NIGERIA NOW</span><h2>Nigeria</h2></div></div>
+      <div id="nigeriaGrid" class="news-grid four"></div>
     </section>
 
-    <section id="politics" class="news-section category-section">
-      <div class="section-header">
-        <div><span class="eyebrow">POLITICS</span><h2>Politics</h2></div>
-      </div>
-      <div id="politicsGrid" class="news-grid four-up"></div>
+    <section id="politics" class="section category-section">
+      <div class="section-heading"><div><span class="eyebrow">POLITICS</span><h2>Politics</h2></div></div>
+      <div id="politicsGrid" class="news-grid four"></div>
     </section>
 
-    <section id="business" class="news-section category-section">
-      <div class="section-header">
-        <div><span class="eyebrow">BUSINESS</span><h2>Business</h2></div>
-      </div>
-      <div id="businessGrid" class="news-grid four-up"></div>
+    <section id="business" class="section category-section">
+      <div class="section-heading"><div><span class="eyebrow">BUSINESS</span><h2>Business</h2></div></div>
+      <div id="businessGrid" class="news-grid four"></div>
     </section>
 
-    <section id="technology" class="news-section category-section">
-      <div class="section-header">
-        <div><span class="eyebrow">TECHNOLOGY</span><h2>Technology</h2></div>
-      </div>
-      <div id="technologyGrid" class="news-grid four-up"></div>
+    <section id="technology" class="section category-section">
+      <div class="section-heading"><div><span class="eyebrow">TECHNOLOGY</span><h2>Technology</h2></div></div>
+      <div id="technologyGrid" class="news-grid four"></div>
     </section>
 
-    <section id="sports" class="news-section category-section">
-      <div class="section-header">
-        <div><span class="eyebrow">SPORTS</span><h2>Sports</h2></div>
-      </div>
-      <div id="sportsGrid" class="news-grid four-up"></div>
+    <section id="sports" class="section category-section">
+      <div class="section-heading"><div><span class="eyebrow">SPORTS</span><h2>Sports</h2></div></div>
+      <div id="sportsGrid" class="news-grid four"></div>
     </section>
 
-    <section id="world" class="news-section category-section">
-      <div class="section-header">
-        <div><span class="eyebrow">WORLD PULSE</span><h2>World</h2></div>
-      </div>
-      <div id="worldGrid" class="news-grid four-up"></div>
+    <section id="world" class="section category-section">
+      <div class="section-heading"><div><span class="eyebrow">AROUND THE WORLD</span><h2>World</h2></div></div>
+      <div id="worldGrid" class="news-grid four"></div>
     </section>
 
-    <section id="newsDesk" class="ai-desk">
-      <div class="ai-desk-copy">
+    <section id="mostReported" class="section category-section">
+      <div class="section-heading">
+        <div><span class="eyebrow">MOST REPORTED</span><h2>Stories covered across sources</h2></div>
+      </div>
+      <div id="mostReportedGrid" class="news-grid four"></div>
+    </section>
+
+    <section id="newsdesk" class="ai-desk">
+      <div>
         <span class="eyebrow">AI NEWS DESK</span>
         <h2>Ask about what is happening.</h2>
-        <p>Use the existing THE VOICE REPORTER AI proxy to get a concise newsroom-style answer about current stories.</p>
+        <p class="muted">This connects to the existing THE VOICE REPORTER server AI route, which in turn uses your existing StudentNija proxy and its configured fallbacks.</p>
       </div>
-      <div class="ai-desk-panel">
-        <textarea id="aiQuestion" rows="5" placeholder="Example: What are the biggest stories in Nigeria today?"></textarea>
-        <div class="ai-actions">
-          <button id="askAiBtn" class="primary-btn" type="button">Ask the News Desk</button>
-          <button id="clearAiBtn" class="secondary-btn" type="button">Clear</button>
+      <div>
+        <textarea id="deskQuestion" rows="5" placeholder="What are the biggest stories in Nigeria today?"></textarea>
+        <div class="desk-actions">
+          <button id="deskAsk" class="primary-btn" type="button">Ask AI</button>
+          <button id="briefBtn" class="secondary-btn" type="button">60-second brief</button>
+          <button id="deskClear" class="secondary-btn" type="button">Clear</button>
         </div>
-        <div id="aiAnswer" class="ai-answer" aria-live="polite">
-          <span class="answer-placeholder">Your answer will appear here.</span>
-        </div>
+        <div id="deskAnswer" class="ai-answer" aria-live="polite"><span class="muted">Your answer will appear here.</span></div>
       </div>
     </section>
   </main>
 
-  <nav class="mobile-bottom-nav" aria-label="Mobile quick navigation">
+  <nav class="mobile-bottom" aria-label="Mobile quick navigation">
     <a href="#latest" class="active"><span>⌂</span><small>Latest</small></a>
     <a href="#nigeria"><span>NG</span><small>Nigeria</small></a>
     <a href="#world"><span>◎</span><small>World</small></a>
-    <a href="#newsDesk"><span>AI</span><small>Ask AI</small></a>
+    <a href="#newsdesk"><span>AI</span><small>Ask AI</small></a>
   </nav>
 
   <footer class="site-footer">
     <div class="container footer-grid">
-      <div class="footer-main">
+      <div>
         <div class="footer-brand">THE VOICE REPORTER</div>
-        <p>Live news from Nigeria, Africa and the world. Stories remain attributed to their original publishers.</p>
+        <p>Live news from Nigeria and around the world, with editorial stories, an internal reader, AI newsroom tools and audio narration.</p>
       </div>
-      <div>
-        <h4>Sections</h4>
-        <a href="#nigeria">Nigeria</a>
-        <a href="#business">Business</a>
-        <a href="#technology">Technology</a>
-        <a href="#world">World</a>
-      </div>
-      <div>
-        <h4>Newsroom</h4>
-        <a href="#latest">Latest</a>
-        <a href="#newsDesk">AI News Desk</a>
-      </div>
-      <div>
-        <h4>Status</h4>
-        <p id="footerStatus">Connecting…</p>
-      </div>
+      <div><h4>Explore</h4><a href="#latest">Latest</a><a href="#nigeria">Nigeria</a><a href="#world">World</a></div>
+      <div><h4>Sections</h4><a href="#politics">Politics</a><a href="#business">Business</a><a href="#technology">Technology</a><a href="#sports">Sports</a></div>
+      <div><h4>Status</h4><p id="footerStatus">Connecting…</p></div>
     </div>
-    <div class="footer-bottom">
-      <div class="container">© 2026 THE VOICE REPORTER</div>
-    </div>
+    <div class="footer-bottom"><div class="container">© 2026 THE VOICE REPORTER</div></div>
   </footer>
 
   <div id="toast" class="toast" role="status"></div>
