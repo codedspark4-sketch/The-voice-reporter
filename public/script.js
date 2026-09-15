@@ -32,5 +32,6 @@ async function askDesk(isBrief){const answer=$('deskAnswer');if(state.settings?.
 function badges(x){const a=[];if(x.isBreaking)a.push('BREAKING');else if(x.isDeveloping)a.push('DEVELOPING');else if(x.isUpdated)a.push('UPDATED');a.push(x.category||'NEWS');return a.join(' · ')}
 function format(v){const d=new Date(v);return Number.isNaN(d.getTime())?'Latest':d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}
 function safe(v){try{const u=new URL(v,location.origin);return /^(http|https):$/.test(u.protocol)?u.href:''}catch{return ''}}
+function esc(v){return String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]))}
 function escAttr(v){return esc(v).replace(/`/g,'&#096;').replace(/'/g,'&#039;')}
 let toastTimer;function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),2400)}
