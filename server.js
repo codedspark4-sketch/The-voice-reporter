@@ -11,7 +11,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const PROXY_URL = process.env.PROXY_URL || 'https://studentnija-proxy-v2.donchester111.workers.dev';
 
-const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || '').trim().replace(/\/+$/, '');
+const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGIN || '')
+  .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'uploads';
 
@@ -32,7 +33,7 @@ app.set('trust proxy', 1);
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const allowed = FRONTEND_ORIGIN ? origin === FRONTEND_ORIGIN : !!origin;
+  const allowed = FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS.includes(origin) : !!origin;
   if (allowed && origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -168,9 +169,6 @@ function normalizeStore(s) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Supabase-backed store
-// ---------------------------------------------------------------------------
 let store = freshStore();
 let saveTimer = null;
 let saveInFlight = null;
@@ -189,7 +187,6 @@ async function saveStoreNow() {
   if (error) throw new Error(error.message);
 }
 
-// Coalesces rapid mutations into one write every ~600ms.
 function saveStore() {
   if (saveTimer) return;
   saveTimer = setTimeout(async () => {
@@ -201,9 +198,6 @@ function saveStore() {
   }, 600);
 }
 
-// ---------------------------------------------------------------------------
-// Sessions (in-memory)
-// ---------------------------------------------------------------------------
 const sessions = new Map();
 function readCookie(req, name) {
   for (const part of String(req.headers.cookie || '').split(';')) {
@@ -233,13 +227,13 @@ function requireRole(...roles) {
   };
 }
 function setSession(res, token) {
-  const cross = !!FRONTEND_ORIGIN;
+  const cross = FRONTEND_ORIGINS.length > 0;
   const sameSite = cross ? 'None' : 'Lax';
   const secure = (cross || process.env.NODE_ENV === 'production') ? '; Secure' : '';
   res.setHeader('Set-Cookie', `tvr_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=${sameSite}${secure}; Max-Age=43200`);
 }
 function clearSession(res) {
-  const cross = !!FRONTEND_ORIGIN;
+  const cross = FRONTEND_ORIGINS.length > 0;
   const sameSite = cross ? 'None' : 'Lax';
   const secure = (cross || process.env.NODE_ENV === 'production') ? '; Secure' : '';
   res.setHeader('Set-Cookie', `tvr_session=; Path=/; HttpOnly; SameSite=${sameSite}${secure}; Max-Age=0`);
@@ -391,7 +385,6 @@ function sanitizeStoryInput(body) {
 }
 function canEditStory(user, story) { return user.role === 'admin' || user.role === 'editor' || story.authorId === user.id; }
 
-// Uploads go to Supabase Storage (memory buffer → bucket).
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 },
@@ -444,9 +437,6 @@ function publicNewsPayload(limit = 180) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Public routes
-// ---------------------------------------------------------------------------
 app.get('/', (_req, res) => res.json({ ok: true, service: 'THE VOICE REPORTER API', version: 4, storage: 'supabase', health: '/api/health' }));
 app.get('/api/config', (_req, res) => res.json({ ok: true, settings: store.settings }));
 app.get('/api/news', (req, res) => res.json(publicNewsPayload(req.query.limit)));
@@ -473,14 +463,11 @@ app.get('/api/health', async (_req, res) => {
     writers: store.writers.length,
     proxy: { url: PROXY_URL, reachable: proxyReachable },
     supabase: { ok: supabaseOk, error: supabaseError, bucket: SUPABASE_BUCKET },
-    cors: { frontendOrigin: FRONTEND_ORIGIN || '(any)' },
+    cors: { allowedOrigins: FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS : ['(any)'] },
     storage: 'supabase'
   });
 });
 
-// ---------------------------------------------------------------------------
-// External article reader (with SSRF guard)
-// ---------------------------------------------------------------------------
 function isPrivateHost(hostname) {
   const h = String(hostname || '').toLowerCase();
   if (!h) return true;
@@ -533,9 +520,6 @@ app.get('/api/story/:id', (req, res) => {
   res.json({ ok: true, story: s });
 });
 
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
 app.post('/api/auth/admin', (req, res) => {
   const { username, password } = req.body || {};
   if (username !== store.admin.username || !verifyPassword(password, store.admin.passwordHash))
@@ -568,9 +552,6 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------------------------------------------------------------------------
-// AI proxy
-// ---------------------------------------------------------------------------
 app.post('/api/ai/:mode', async (req, res) => {
   const mode = req.params.mode === 'ask' ? 'chat' : req.params.mode;
   const allowed = { chat: store.settings.ai.chat, think: store.settings.ai.think, expert: store.settings.ai.expert, vision: store.settings.ai.vision };
@@ -590,9 +571,6 @@ app.post('/api/ai/fetch-url', async (req, res) => {
   catch (e) { res.status(502).json({ ok: false, error: e.message }); }
 });
 
-// ---------------------------------------------------------------------------
-// Upload → Supabase Storage
-// ---------------------------------------------------------------------------
 app.post('/api/upload', requireRole('admin', 'editor', 'writer'), (req, res) => {
   upload.single('file')(req, res, async err => {
     if (err) return res.status(400).json({ ok: false, error: err.message });
@@ -613,9 +591,6 @@ app.post('/api/upload', requireRole('admin', 'editor', 'writer'), (req, res) => 
   });
 });
 
-// ---------------------------------------------------------------------------
-// Writer routes
-// ---------------------------------------------------------------------------
 app.get('/api/writer/stories', requireRole('admin', 'editor', 'writer'), (req, res) => {
   let list = store.stories;
   if (req.user.role === 'writer') list = list.filter(s => s.authorId === req.user.id);
@@ -660,9 +635,6 @@ app.delete('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), 
   res.json({ ok: true });
 });
 
-// ---------------------------------------------------------------------------
-// Admin routes
-// ---------------------------------------------------------------------------
 app.get('/api/admin/stories', requireRole('admin', 'editor'), (_req, res) =>
   res.json({ ok: true, stories: store.stories.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)) }));
 app.get('/api/admin/dashboard', requireRole('admin', 'editor'), (_req, res) => {
@@ -799,9 +771,6 @@ app.patch('/api/admin/stories/:id', requireRole('admin', 'editor'), async (req, 
 
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Not found', path: req.path }));
 
-// ---------------------------------------------------------------------------
-// Boot
-// ---------------------------------------------------------------------------
 async function boot() {
   try {
     const loaded = await loadStoreFromSupabase();
@@ -814,7 +783,6 @@ async function boot() {
     }
   } catch (e) {
     console.error('[boot] failed to load store:', e.message);
-    console.error('[boot] continuing with in-memory store; writes will retry');
     store = freshStore();
   }
 
