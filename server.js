@@ -31,6 +31,7 @@ const parser = new Parser({
 
 app.set('trust proxy', 1);
 
+// ─── CORS ───
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allowed = FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS.includes(origin) : !!origin;
@@ -51,6 +52,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '12mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
+// ─── Feeds ───
 const BUILTIN_FEEDS = [
   ['PUNCH', 'Nigeria', 'Nigeria', 'https://rss.punchng.com/v1/category/latest_news'],
   ['PUNCH Politics', 'Nigeria', 'Politics', 'https://rss.punchng.com/v1/category/politics'],
@@ -70,7 +72,7 @@ const BUILTIN_FEEDS = [
   ['The Guardian World', 'World', 'World', 'https://www.theguardian.com/world/rss'],
   ['New York Times World', 'World', 'World', 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml'],
   ['NPR World', 'World', 'World', 'https://feeds.npr.org/1004/rss.xml'],
-  ['Sky News World', 'World', 'World', 'https://feeds.skynews.com/feeds/rss/world.xml'],
+  ['Sky News World', 'World', 'World', 'https://feeds.skynet.com/feeds/rss/world.xml'.replace('skynet', 'skynews')],
   ['NHK Global', 'World', 'World', 'https://www3.nhk.or.jp/rssxml/news/globalnewsroom.xml'],
   ['CBC World', 'World', 'World', 'https://www.cbc.ca/webfeed/rss/rss-world'],
   ['TechCrunch', 'World', 'Technology', 'https://techcrunch.com/feed/'],
@@ -93,8 +95,18 @@ const REMOTE_FALLBACKS = {
 };
 
 const DEFAULT_SETTINGS = {
-  site: { title: 'THE VOICE REPORTER', tagline: 'REAL NEWS • NIGERIA • AFRICA • WORLD', tickerEnabled: true, tickerSpeed: 72, autoRefreshSeconds: 20 },
-  sections: { latest: true, nigeria: true, politics: true, business: true, technology: true, sports: true, world: true, mostReported: true, aiDesk: true, brief: true },
+  site: {
+    title: 'THE VOICE REPORTER',
+    tagline: 'REAL NEWS • NIGERIA • AFRICA • WORLD',
+    tickerEnabled: true,
+    tickerSpeed: 72,
+    autoRefreshSeconds: 20
+  },
+  sections: {
+    latest: true, nigeria: true, politics: true, business: true,
+    technology: true, sports: true, world: true, mostReported: true,
+    aiDesk: true, brief: true
+  },
   ai: {
     enabled: true, chat: true, think: true, expert: true, vision: true, search: true,
     prompts: {
@@ -105,11 +117,12 @@ const DEFAULT_SETTINGS = {
     }
   },
   tts: { enabled: true, rate: 1, pitch: 1, volume: 1 },
-  publishing: { writersNeedApproval: true, allowWriterEditPublished: false },
+  publishing: { writersNeedApproval: true, allowWriterEditPublished: false, commentsEnabled: true },
   theme: { default: 'system', accent: '#be1212' },
   fallbacks: { ...REMOTE_FALLBACKS }
 };
 
+// ─── Utils ───
 function clone(v) { return JSON.parse(JSON.stringify(v)); }
 function now() { return new Date().toISOString(); }
 function uid(p = 'id') { return `${p}_${crypto.randomUUID().replace(/-/g, '')}`; }
@@ -134,6 +147,7 @@ function decodeHtml(input = '') {
 }
 function normalizeTitle(v = '') { return String(v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 
+// ─── Store ───
 function freshStore() {
   return {
     version: 4,
@@ -198,6 +212,7 @@ function saveStore() {
   }, 600);
 }
 
+// ─── Sessions ───
 const sessions = new Map();
 function readCookie(req, name) {
   for (const part of String(req.headers.cookie || '').split(';')) {
@@ -239,11 +254,17 @@ function clearSession(res) {
   res.setHeader('Set-Cookie', `tvr_session=; Path=/; HttpOnly; SameSite=${sameSite}${secure}; Max-Age=0`);
 }
 function audit(action, req, meta = {}) {
-  store.audit.unshift({ id: uid('audit'), action, at: now(), actor: { id: req?.user?.id || 'system', username: req?.user?.username || 'system', role: req?.user?.role || 'system' }, ip: req?.ip || '', meta });
+  store.audit.unshift({
+    id: uid('audit'), action, at: now(),
+    actor: { id: req?.user?.id || 'system', username: req?.user?.username || 'system', role: req?.user?.role || 'system' },
+    ip: req?.ip || '',
+    meta
+  });
   store.audit = store.audit.slice(0, 300);
   saveStore();
 }
 
+// ─── Feed helpers ───
 function categoryFallback(category) {
   const key = Object.keys(store.settings.fallbacks || {}).find(k => k.toLowerCase() === String(category || 'News').toLowerCase()) || 'News';
   return store.settings.fallbacks?.[key] || REMOTE_FALLBACKS.News;
@@ -315,7 +336,10 @@ async function fetchFeed(feed) {
   return out;
 }
 function publicStories() {
-  return store.stories.filter(s => s.status === 'published' || (s.status === 'scheduled' && s.scheduledAt && new Date(s.scheduledAt) <= new Date())).map(s => ({
+  return store.stories.filter(s =>
+    s.status === 'published' ||
+    (s.status === 'scheduled' && s.scheduledAt && new Date(s.scheduledAt) <= new Date())
+  ).map(s => ({
     id: s.id, title: s.title, subheadline: s.subheadline,
     description: s.subheadline || decodeHtml(s.body).slice(0, 300),
     body: s.body,
@@ -367,7 +391,9 @@ function sanitizeStoryInput(body) {
     body: safeText(body.body, 150000),
     category: safeText(body.category || 'Nigeria', 60),
     region: safeText(body.region || 'Nigeria', 60),
-    tags: Array.isArray(body.tags) ? body.tags.map(x => safeText(x, 40)).filter(Boolean).slice(0, 20) : safeText(body.tags || '', 500).split(',').map(x => x.trim()).filter(Boolean),
+    tags: Array.isArray(body.tags)
+      ? body.tags.map(x => safeText(x, 40)).filter(Boolean).slice(0, 20)
+      : safeText(body.tags || '', 500).split(',').map(x => x.trim()).filter(Boolean),
     image: safeText(body.image, 2000000),
     imageCaption: safeText(body.imageCaption, 400),
     video: safeText(body.video, 2000000),
@@ -378,12 +404,16 @@ function sanitizeStoryInput(body) {
     seoDescription: safeText(body.seoDescription, 320),
     status: ['draft', 'submitted', 'published', 'rejected', 'scheduled'].includes(body.status) ? body.status : 'draft',
     scheduledAt: body.scheduledAt || null,
-    isBreaking: !!body.isBreaking, isDeveloping: !!body.isDeveloping,
-    isUpdated: !!body.isUpdated, featured: !!body.featured,
+    isBreaking: !!body.isBreaking,
+    isDeveloping: !!body.isDeveloping,
+    isUpdated: !!body.isUpdated,
+    featured: !!body.featured,
     sourceAttribution: safeText(body.sourceAttribution, 600)
   };
 }
-function canEditStory(user, story) { return user.role === 'admin' || user.role === 'editor' || story.authorId === user.id; }
+function canEditStory(user, story) {
+  return user.role === 'admin' || user.role === 'editor' || story.authorId === user.id;
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -396,17 +426,22 @@ const upload = multer({
 
 async function proxyJson(endpoint, payload) {
   const r = await fetch(`${PROXY_URL}${endpoint}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
   });
   const text = await r.text();
-  let data; try { data = JSON.parse(text); } catch { data = { success: false, error: text || `Proxy ${r.status}` }; }
+  let data;
+  try { data = JSON.parse(text); }
+  catch { data = { success: false, error: text || `Proxy ${r.status}` }; }
   if (!r.ok) throw new Error(data.error || `AI proxy returned ${r.status}`);
   return data;
 }
 
 function newsCardItem(item) {
   return {
-    id: item.id, title: item.title,
+    id: item.id,
+    title: item.title,
     subheadline: item.subheadline || '',
     description: item.description || '',
     link: item.link || '',
@@ -416,14 +451,17 @@ function newsCardItem(item) {
     video: item.video || '',
     source: item.source || 'THE VOICE REPORTER',
     sourceAttribution: item.sourceAttribution || '',
-    author: item.author || '', region: item.region || '',
+    author: item.author || '',
+    region: item.region || '',
     category: item.category || 'News',
     publishedAt: item.publishedAt || item.updatedAt || now(),
     updatedAt: item.updatedAt || '',
     editorial: !!item.editorial,
     status: item.status || 'published',
-    isBreaking: !!item.isBreaking, isDeveloping: !!item.isDeveloping,
-    isUpdated: !!item.isUpdated, featured: !!item.featured,
+    isBreaking: !!item.isBreaking,
+    isDeveloping: !!item.isDeveloping,
+    isUpdated: !!item.isUpdated,
+    featured: !!item.featured,
     slug: item.slug || ''
   };
 }
@@ -437,25 +475,47 @@ function publicNewsPayload(limit = 180) {
   };
 }
 
-app.get('/', (_req, res) => res.json({ ok: true, service: 'THE VOICE REPORTER API', version: 4, storage: 'supabase', health: '/api/health' }));
+// ═══════════════════════════════════════════
+// PUBLIC ROUTES
+// ═══════════════════════════════════════════
+
+app.get('/', (_req, res) => res.json({
+  ok: true,
+  service: 'THE VOICE REPORTER API',
+  version: 4,
+  storage: 'supabase',
+  health: '/api/health'
+}));
+
 app.get('/api/config', (_req, res) => res.json({ ok: true, settings: store.settings }));
 app.get('/api/news', (req, res) => res.json(publicNewsPayload(req.query.limit)));
 app.get('/api/news-lite', (req, res) => res.json(publicNewsPayload(req.query.limit)));
+
 app.post('/api/refresh', async (_req, res) => {
-  try { const c = await refreshNews(); res.json({ ok: true, updatedAt: new Date(c.updatedAt).toISOString(), stories: c.items.length, sources: c.sources }); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try {
+    const c = await refreshNews();
+    res.json({ ok: true, updatedAt: new Date(c.updatedAt).toISOString(), stories: c.items.length, sources: c.sources });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
+
 app.get('/api/health', async (_req, res) => {
   let proxyReachable = false;
   try { const r = await fetch(`${PROXY_URL}/health`); proxyReachable = r.ok; } catch {}
+
   let supabaseOk = false, supabaseError = null;
   try {
     const { error } = await supabase.from('store').select('id').eq('id', 'main').maybeSingle();
     if (error) throw error;
     supabaseOk = true;
   } catch (e) { supabaseError = e.message; }
+
   res.json({
-    ok: true, service: 'THE VOICE REPORTER', version: 4, serverTime: now(),
+    ok: true,
+    service: 'THE VOICE REPORTER',
+    version: 4,
+    serverTime: now(),
     newsUpdatedAt: cache.updatedAt ? new Date(cache.updatedAt).toISOString() : null,
     feeds: getFeeds().length,
     feedStories: cache.items.length,
@@ -468,6 +528,7 @@ app.get('/api/health', async (_req, res) => {
   });
 });
 
+// ─── External article reader (SSRF-guarded) ───
 function isPrivateHost(hostname) {
   const h = String(hostname || '').toLowerCase();
   if (!h) return true;
@@ -485,6 +546,7 @@ function isPrivateHost(hostname) {
   if (h.includes(':') && (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80'))) return true;
   return false;
 }
+
 async function fetchExternalArticle(url) {
   const u = new URL(url);
   if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Invalid article URL');
@@ -500,13 +562,16 @@ async function fetchExternalArticle(url) {
   const article = new Readability(dom.window.document).parse();
   if (!article || !article.textContent || article.textContent.trim().length < 80) throw new Error('Could not extract a readable article');
   return {
-    title: article.title || '', byline: article.byline || '', excerpt: article.excerpt || '',
+    title: article.title || '',
+    byline: article.byline || '',
+    excerpt: article.excerpt || '',
     content: article.content || '',
     siteName: article.siteName || new URL(r.url).hostname,
     publishedTime: article.publishedTime || '',
     url: r.url
   };
 }
+
 app.get('/api/article', async (req, res) => {
   const url = safeText(req.query.url, 4000);
   if (!url) return res.status(400).json({ ok: false, error: 'Article URL is required.' });
@@ -520,6 +585,139 @@ app.get('/api/story/:id', (req, res) => {
   res.json({ ok: true, story: s });
 });
 
+// ═══════════════════════════════════════════
+// ENGAGEMENT (likes + comments)
+// ═══════════════════════════════════════════
+
+let engagementCache = { at: 0, likes: {}, comments: {} };
+
+// Summary of all counts (used by home page)
+app.get('/api/engagement-summary', async (_req, res) => {
+  try {
+    if (Date.now() - engagementCache.at < 30000) {
+      return res.json({ ok: true, likes: engagementCache.likes, comments: engagementCache.comments });
+    }
+    const [{ data: likeRows }, { data: commentRows }] = await Promise.all([
+      supabase.from('likes').select('story_id'),
+      supabase.from('comments').select('story_id').eq('status', 'approved')
+    ]);
+    const likes = {};
+    const comments = {};
+    for (const r of likeRows || []) likes[r.story_id] = (likes[r.story_id] || 0) + 1;
+    for (const r of commentRows || []) comments[r.story_id] = (comments[r.story_id] || 0) + 1;
+    engagementCache = { at: Date.now(), likes, comments };
+    res.json({ ok: true, likes, comments });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Per-story detail (used by article page)
+app.get('/api/engagement/:storyId', async (req, res) => {
+  try {
+    const storyId = safeText(decodeURIComponent(req.params.storyId), 500);
+    const visitorId = safeText(req.query.visitor || '', 80);
+    if (!storyId) return res.status(400).json({ ok: false, error: 'Story ID required' });
+
+    const [likeCountRes, likedRes, commentsRes] = await Promise.all([
+      supabase.from('likes').select('*', { count: 'exact', head: true }).eq('story_id', storyId),
+      visitorId
+        ? supabase.from('likes').select('id').eq('story_id', storyId).eq('visitor_id', visitorId).maybeSingle()
+        : Promise.resolve({ data: null }),
+      supabase.from('comments').select('id, name, body, created_at')
+        .eq('story_id', storyId).eq('status', 'approved')
+        .order('created_at', { ascending: false }).limit(80)
+    ]);
+
+    res.json({
+      ok: true,
+      likes: likeCountRes.count || 0,
+      liked: !!likedRes.data,
+      comments: (commentsRes.data || []).map(c => ({
+        id: c.id,
+        name: c.name,
+        body: c.body,
+        at: c.created_at
+      }))
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Toggle like
+app.post('/api/like', async (req, res) => {
+  try {
+    const storyId = safeText(req.body?.storyId, 500);
+    const visitorId = safeText(req.body?.visitorId, 80);
+    if (!storyId || !visitorId) return res.status(400).json({ ok: false, error: 'Missing story or visitor' });
+
+    const { data: existing } = await supabase.from('likes')
+      .select('id').eq('story_id', storyId).eq('visitor_id', visitorId).maybeSingle();
+
+    if (existing) {
+      await supabase.from('likes').delete().eq('id', existing.id);
+    } else {
+      const { error } = await supabase.from('likes').insert({ story_id: storyId, visitor_id: visitorId });
+      if (error) throw new Error(error.message);
+    }
+
+    engagementCache.at = 0;
+    const { count } = await supabase.from('likes')
+      .select('*', { count: 'exact', head: true }).eq('story_id', storyId);
+
+    res.json({ ok: true, liked: !existing, likes: count || 0 });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Post comment
+app.post('/api/comment', async (req, res) => {
+  try {
+    const storyId = safeText(req.body?.storyId, 500);
+    const name = safeText(req.body?.name || 'Anonymous', 60) || 'Anonymous';
+    const body = safeText(req.body?.body, 2000);
+    const visitorId = safeText(req.body?.visitorId, 80);
+
+    if (!storyId || !body) return res.status(400).json({ ok: false, error: 'Story and comment are required' });
+    if (body.length < 2) return res.status(400).json({ ok: false, error: 'Comment is too short' });
+    if (body.length > 2000) return res.status(400).json({ ok: false, error: 'Comment is too long (2000 characters max)' });
+
+    // Rate limit: max 5 comments per visitor per hour
+    if (visitorId) {
+      const oneHourAgo = new Date(Date.now() - 3600 * 1000).toISOString();
+      const { count } = await supabase.from('comments')
+        .select('*', { count: 'exact', head: true })
+        .eq('visitor_id', visitorId).gte('created_at', oneHourAgo);
+      if ((count || 0) >= 5)
+        return res.status(429).json({ ok: false, error: 'You are commenting too fast. Try again in a bit.' });
+    }
+
+    const { data, error } = await supabase.from('comments').insert({
+      story_id: storyId,
+      name,
+      body,
+      visitor_id: visitorId,
+      status: 'approved'
+    }).select().single();
+
+    if (error) throw new Error(error.message);
+    engagementCache.at = 0;
+
+    res.json({
+      ok: true,
+      comment: { id: data.id, name: data.name, body: data.body, at: data.created_at }
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════
+// AUTH
+// ═══════════════════════════════════════════
+
 app.post('/api/auth/admin', (req, res) => {
   const { username, password } = req.body || {};
   if (username !== store.admin.username || !verifyPassword(password, store.admin.passwordHash))
@@ -529,22 +727,30 @@ app.post('/api/auth/admin', (req, res) => {
   audit('admin.login', req);
   res.json({ ok: true, user: { id: 'admin', username: 'admin', role: 'admin', name: 'Administrator' } });
 });
+
 app.post('/api/auth/writer', (req, res) => {
   const { username, password } = req.body || {};
   const w = store.writers.find(x => (x.username === username || x.email === username) && x.status === 'active');
   if (!w || !verifyPassword(password, w.passwordHash))
     return res.status(401).json({ ok: false, error: 'Invalid writer credentials' });
-  w.lastLoginAt = now(); saveStore();
+  w.lastLoginAt = now();
+  saveStore();
   const role = w.role === 'editor' ? 'editor' : 'writer';
   const token = issueSession({ id: w.id, username: w.username, role, name: w.name });
   setSession(res, token);
   audit('writer.login', req);
   res.json({ ok: true, user: { id: w.id, username: w.username, name: w.name, role } });
 });
+
 app.get('/api/auth/me', (req, res) => {
   const u = auth(req);
-  res.json({ ok: true, authenticated: !!u, user: u ? { id: u.id, username: u.username, name: u.name || '', role: u.role } : null });
+  res.json({
+    ok: true,
+    authenticated: !!u,
+    user: u ? { id: u.id, username: u.username, name: u.name || '', role: u.role } : null
+  });
 });
+
 app.post('/api/auth/logout', (req, res) => {
   const token = readCookie(req, 'tvr_session');
   if (token) sessions.delete(token);
@@ -552,24 +758,39 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// ═══════════════════════════════════════════
+// AI PROXY
+// ═══════════════════════════════════════════
+
 app.post('/api/ai/:mode', async (req, res) => {
   const mode = req.params.mode === 'ask' ? 'chat' : req.params.mode;
-  const allowed = { chat: store.settings.ai.chat, think: store.settings.ai.think, expert: store.settings.ai.expert, vision: store.settings.ai.vision };
+  const allowed = {
+    chat: store.settings.ai.chat,
+    think: store.settings.ai.think,
+    expert: store.settings.ai.expert,
+    vision: store.settings.ai.vision
+  };
   if (!store.settings.ai.enabled || allowed[mode] === false)
     return res.status(403).json({ ok: false, error: 'This AI feature is disabled.' });
   try { res.json(await proxyJson(`/${['chat', 'think', 'expert', 'vision'].includes(mode) ? mode : 'chat'}`, req.body || {})); }
   catch (e) { res.status(502).json({ ok: false, error: e.message }); }
 });
+
 app.post('/api/ai/search', async (req, res) => {
   if (!store.settings.ai.enabled || store.settings.ai.search === false)
     return res.status(403).json({ ok: false, error: 'AI search is disabled.' });
   try { res.json(await proxyJson('/search', req.body || {})); }
   catch (e) { res.status(502).json({ ok: false, error: e.message }); }
 });
+
 app.post('/api/ai/fetch-url', async (req, res) => {
   try { res.json(await proxyJson('/fetch-url', req.body || {})); }
   catch (e) { res.status(502).json({ ok: false, error: e.message }); }
 });
+
+// ═══════════════════════════════════════════
+// UPLOADS
+// ═══════════════════════════════════════════
 
 app.post('/api/upload', requireRole('admin', 'editor', 'writer'), (req, res) => {
   upload.single('file')(req, res, async err => {
@@ -591,18 +812,25 @@ app.post('/api/upload', requireRole('admin', 'editor', 'writer'), (req, res) => 
   });
 });
 
+// ═══════════════════════════════════════════
+// WRITER ROUTES
+// ═══════════════════════════════════════════
+
 app.get('/api/writer/stories', requireRole('admin', 'editor', 'writer'), (req, res) => {
   let list = store.stories;
   if (req.user.role === 'writer') list = list.filter(s => s.authorId === req.user.id);
   res.json({ ok: true, stories: list.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)) });
 });
+
 app.post('/api/writer/stories', requireRole('admin', 'editor', 'writer'), async (req, res) => {
   const story = sanitizeStoryInput(req.body || {});
-  if (!story.title || !story.body) return res.status(400).json({ ok: false, error: 'Headline and article body are required.' });
+  if (!story.title || !story.body)
+    return res.status(400).json({ ok: false, error: 'Headline and article body are required.' });
   story.id = uid('story');
   story.authorId = req.user.id;
   story.author = story.author || req.user.name || req.user.username;
-  story.createdAt = now(); story.updatedAt = now();
+  story.createdAt = now();
+  story.updatedAt = now();
   story.publishedAt = story.status === 'published' ? now() : null;
   if (req.user.role === 'writer' && store.settings.publishing.writersNeedApproval && ['published', 'scheduled'].includes(story.status))
     story.status = 'submitted';
@@ -611,12 +839,20 @@ app.post('/api/writer/stories', requireRole('admin', 'editor', 'writer'), async 
   try { await refreshNews(); } catch {}
   res.json({ ok: true, story });
 });
+
 app.patch('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), async (req, res) => {
   const story = store.stories.find(s => s.id === req.params.id);
   if (!story) return res.status(404).json({ ok: false, error: 'Story not found' });
-  if (!canEditStory(req.user, story)) return res.status(403).json({ ok: false, error: 'You cannot edit this story.' });
+  if (!canEditStory(req.user, story))
+    return res.status(403).json({ ok: false, error: 'You cannot edit this story.' });
   const old = story.status;
-  Object.assign(story, sanitizeStoryInput({ ...story, ...req.body }), { id: story.id, authorId: story.authorId, createdAt: story.createdAt, updatedAt: now(), publishedAt: story.publishedAt });
+  Object.assign(story, sanitizeStoryInput({ ...story, ...req.body }), {
+    id: story.id,
+    authorId: story.authorId,
+    createdAt: story.createdAt,
+    updatedAt: now(),
+    publishedAt: story.publishedAt
+  });
   if (story.status === 'published' && old !== 'published') story.publishedAt = now();
   if (req.user.role === 'writer' && store.settings.publishing.writersNeedApproval && old === 'published' && !store.settings.publishing.allowWriterEditPublished)
     story.status = 'submitted';
@@ -624,19 +860,26 @@ app.patch('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), a
   try { await refreshNews(); } catch {}
   res.json({ ok: true, story });
 });
+
 app.delete('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), async (req, res) => {
   const idx = store.stories.findIndex(s => s.id === req.params.id);
   if (idx < 0) return res.status(404).json({ ok: false, error: 'Story not found' });
   const story = store.stories[idx];
-  if (!canEditStory(req.user, story)) return res.status(403).json({ ok: false, error: 'You cannot delete this story.' });
+  if (!canEditStory(req.user, story))
+    return res.status(403).json({ ok: false, error: 'You cannot delete this story.' });
   store.stories.splice(idx, 1);
   audit('story.delete', req, { storyId: story.id });
   try { await refreshNews(); } catch {}
   res.json({ ok: true });
 });
 
+// ═══════════════════════════════════════════
+// ADMIN — STORIES
+// ═══════════════════════════════════════════
+
 app.get('/api/admin/stories', requireRole('admin', 'editor'), (_req, res) =>
   res.json({ ok: true, stories: store.stories.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)) }));
+
 app.get('/api/admin/dashboard', requireRole('admin', 'editor'), (_req, res) => {
   res.json({
     ok: true,
@@ -652,7 +895,40 @@ app.get('/api/admin/dashboard', requireRole('admin', 'editor'), (_req, res) => {
     settings: store.settings
   });
 });
-app.get('/api/admin/settings', requireRole('admin'), (_req, res) => res.json({ ok: true, settings: store.settings }));
+
+app.post('/api/admin/moderate/:id', requireRole('admin', 'editor'), async (req, res) => {
+  const story = store.stories.find(s => s.id === req.params.id);
+  if (!story) return res.status(404).json({ ok: false, error: 'Story not found.' });
+  const status = req.body?.status;
+  if (!['draft', 'submitted', 'published', 'rejected', 'scheduled'].includes(status))
+    return res.status(400).json({ ok: false, error: 'Invalid status' });
+  story.status = status;
+  story.updatedAt = now();
+  if (status === 'published' && !story.publishedAt) story.publishedAt = now();
+  audit('story.moderate', req, { storyId: story.id, status });
+  try { await refreshNews(); } catch {}
+  res.json({ ok: true, story });
+});
+
+app.patch('/api/admin/stories/:id', requireRole('admin', 'editor'), async (req, res) => {
+  const story = store.stories.find(s => s.id === req.params.id);
+  if (!story) return res.status(404).json({ ok: false, error: 'Story not found.' });
+  Object.assign(story, sanitizeStoryInput({ ...story, ...req.body }), {
+    id: story.id, authorId: story.authorId, createdAt: story.createdAt, updatedAt: now(),
+    publishedAt: req.body.status === 'published' && !story.publishedAt ? now() : story.publishedAt
+  });
+  audit('admin.story.update', req, { storyId: story.id });
+  try { await refreshNews(); } catch {}
+  res.json({ ok: true, story });
+});
+
+// ═══════════════════════════════════════════
+// ADMIN — SETTINGS
+// ═══════════════════════════════════════════
+
+app.get('/api/admin/settings', requireRole('admin'), (_req, res) =>
+  res.json({ ok: true, settings: store.settings }));
+
 app.patch('/api/admin/settings', requireRole('admin'), (req, res) => {
   const i = req.body || {};
   store.settings = {
@@ -668,60 +944,91 @@ app.patch('/api/admin/settings', requireRole('admin'), (req, res) => {
   audit('settings.update', req);
   res.json({ ok: true, settings: store.settings, updatedAt: store.updatedAt });
 });
+
 app.post('/api/admin/admin-password', requireRole('admin'), (req, res) => {
   const current = String(req.body?.currentPassword || '');
   const next = String(req.body?.newPassword || '');
   if (next.length < 6) return res.status(400).json({ ok: false, error: 'New password must be at least 6 characters.' });
-  if (!verifyPassword(current, store.admin.passwordHash)) return res.status(401).json({ ok: false, error: 'Current password is incorrect.' });
+  if (!verifyPassword(current, store.admin.passwordHash))
+    return res.status(401).json({ ok: false, error: 'Current password is incorrect.' });
   store.admin.passwordHash = hashPassword(next);
   audit('admin.password_change', req);
   res.json({ ok: true });
 });
+
+// ═══════════════════════════════════════════
+// ADMIN — WRITERS
+// ═══════════════════════════════════════════
+
 app.get('/api/admin/writers', requireRole('admin'), (_req, res) =>
   res.json({ ok: true, writers: store.writers.map(({ passwordHash, ...w }) => w) }));
+
 app.post('/api/admin/writers', requireRole('admin'), (req, res) => {
   const { username, email, password, name, role = 'writer' } = req.body || {};
-  if (!username || !password || !name) return res.status(400).json({ ok: false, error: 'Name, username and password are required.' });
+  if (!username || !password || !name)
+    return res.status(400).json({ ok: false, error: 'Name, username and password are required.' });
   if (store.writers.some(w => w.username === username || (email && w.email === email)))
     return res.status(409).json({ ok: false, error: 'Writer already exists.' });
   const writer = {
-    id: uid('writer'), username: safeText(username, 80), email: safeText(email, 160),
-    passwordHash: hashPassword(password), name: safeText(name, 120),
+    id: uid('writer'),
+    username: safeText(username, 80),
+    email: safeText(email, 160),
+    passwordHash: hashPassword(password),
+    name: safeText(name, 120),
     role: ['writer', 'editor'].includes(role) ? role : 'writer',
-    status: 'active', createdAt: now(), lastLoginAt: null
+    status: 'active',
+    createdAt: now(),
+    lastLoginAt: null
   };
   store.writers.push(writer);
   audit('writer.create', req, { writerId: writer.id });
   const { passwordHash, ...pub } = writer;
   res.json({ ok: true, writer: pub });
 });
+
 app.patch('/api/admin/writers/:id', requireRole('admin'), (req, res) => {
   const w = store.writers.find(x => x.id === req.params.id);
   if (!w) return res.status(404).json({ ok: false, error: 'Writer not found.' });
-  for (const k of ['username', 'email', 'name', 'status']) if (req.body[k] !== undefined) w[k] = safeText(req.body[k], 160);
+  for (const k of ['username', 'email', 'name', 'status'])
+    if (req.body[k] !== undefined) w[k] = safeText(req.body[k], 160);
   if (req.body.role !== undefined && ['writer', 'editor'].includes(req.body.role)) w.role = req.body.role;
   if (req.body.password) w.passwordHash = hashPassword(req.body.password);
   audit('writer.update', req, { writerId: w.id });
   const { passwordHash, ...pub } = w;
   res.json({ ok: true, writer: pub });
 });
+
 app.delete('/api/admin/writers/:id', requireRole('admin'), (req, res) => {
   store.writers = store.writers.filter(w => w.id !== req.params.id);
   audit('writer.delete', req, { writerId: req.params.id });
   res.json({ ok: true });
 });
+
+// ═══════════════════════════════════════════
+// ADMIN — SOURCES
+// ═══════════════════════════════════════════
+
 app.get('/api/admin/sources', requireRole('admin'), (_req, res) =>
   res.json({ ok: true, sources: getFeeds(), custom: store.sources.custom, overrides: store.sources.overrides }));
+
 app.post('/api/admin/sources', requireRole('admin'), (req, res) => {
   const { name, url, category = 'Nigeria', region = 'Nigeria' } = req.body || {};
   if (!name || !url) return res.status(400).json({ ok: false, error: 'Name and URL are required.' });
   const cleanName = safeText(name, 120);
   if (store.sources.custom.some(x => x.name === cleanName) || BUILTIN_FEEDS.some(x => x.name === cleanName))
     return res.status(409).json({ ok: false, error: 'A source with that name already exists.' });
-  store.sources.custom.push({ name: cleanName, url: safeText(url, 500), category: safeText(category, 60), region: safeText(region, 60), enabled: true, builtin: false });
+  store.sources.custom.push({
+    name: cleanName,
+    url: safeText(url, 500),
+    category: safeText(category, 60),
+    region: safeText(region, 60),
+    enabled: true,
+    builtin: false
+  });
   audit('source.create', req, { name: cleanName });
   res.json({ ok: true });
 });
+
 app.patch('/api/admin/sources', requireRole('admin'), async (req, res) => {
   const { name, ...patch } = req.body || {};
   if (!name) return res.status(400).json({ ok: false, error: 'Source name required.' });
@@ -732,6 +1039,7 @@ app.patch('/api/admin/sources', requireRole('admin'), async (req, res) => {
   try { await refreshNews(); } catch {}
   res.json({ ok: true });
 });
+
 app.delete('/api/admin/sources/:name', requireRole('admin'), async (req, res) => {
   const name = decodeURIComponent(req.params.name);
   store.sources.custom = store.sources.custom.filter(x => x.name !== name);
@@ -740,36 +1048,72 @@ app.delete('/api/admin/sources/:name', requireRole('admin'), async (req, res) =>
   try { await refreshNews(); } catch {}
   res.json({ ok: true });
 });
-app.post('/api/admin/refresh', requireRole('admin', 'editor'), async (req, res) => {
-  try { const c = await refreshNews(); audit('news.refresh', req); res.json({ ok: true, updatedAt: new Date(c.updatedAt).toISOString(), count: c.items.length }); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.get('/api/admin/audit', requireRole('admin'), (_req, res) => res.json({ ok: true, audit: store.audit }));
-app.post('/api/admin/moderate/:id', requireRole('admin', 'editor'), async (req, res) => {
-  const story = store.stories.find(s => s.id === req.params.id);
-  if (!story) return res.status(404).json({ ok: false, error: 'Story not found.' });
-  const status = req.body?.status;
-  if (!['draft', 'submitted', 'published', 'rejected', 'scheduled'].includes(status))
-    return res.status(400).json({ ok: false, error: 'Invalid status' });
-  story.status = status; story.updatedAt = now();
-  if (status === 'published' && !story.publishedAt) story.publishedAt = now();
-  audit('story.moderate', req, { storyId: story.id, status });
-  try { await refreshNews(); } catch {}
-  res.json({ ok: true, story });
-});
-app.patch('/api/admin/stories/:id', requireRole('admin', 'editor'), async (req, res) => {
-  const story = store.stories.find(s => s.id === req.params.id);
-  if (!story) return res.status(404).json({ ok: false, error: 'Story not found.' });
-  Object.assign(story, sanitizeStoryInput({ ...story, ...req.body }), {
-    id: story.id, authorId: story.authorId, createdAt: story.createdAt, updatedAt: now(),
-    publishedAt: req.body.status === 'published' && !story.publishedAt ? now() : story.publishedAt
-  });
-  audit('admin.story.update', req, { storyId: story.id });
-  try { await refreshNews(); } catch {}
-  res.json({ ok: true, story });
+
+// ═══════════════════════════════════════════
+// ADMIN — COMMENTS MODERATION
+// ═══════════════════════════════════════════
+
+app.get('/api/admin/comments', requireRole('admin', 'editor'), async (_req, res) => {
+  try {
+    const { data, error } = await supabase.from('comments')
+      .select('*').order('created_at', { ascending: false }).limit(200);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, comments: data || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
+app.patch('/api/admin/comments/:id', requireRole('admin', 'editor'), async (req, res) => {
+  try {
+    const status = req.body?.status;
+    if (!['approved', 'hidden'].includes(status))
+      return res.status(400).json({ ok: false, error: 'Invalid status' });
+    const { error } = await supabase.from('comments').update({ status }).eq('id', req.params.id);
+    if (error) throw new Error(error.message);
+    engagementCache.at = 0;
+    audit('comment.' + status, req, { commentId: req.params.id });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/admin/comments/:id', requireRole('admin', 'editor'), async (req, res) => {
+  try {
+    const { error } = await supabase.from('comments').delete().eq('id', req.params.id);
+    if (error) throw new Error(error.message);
+    engagementCache.at = 0;
+    audit('comment.delete', req, { commentId: req.params.id });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════
+// ADMIN — REFRESH + AUDIT
+// ═══════════════════════════════════════════
+
+app.post('/api/admin/refresh', requireRole('admin', 'editor'), async (req, res) => {
+  try {
+    const c = await refreshNews();
+    audit('news.refresh', req);
+    res.json({ ok: true, updatedAt: new Date(c.updatedAt).toISOString(), count: c.items.length });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/admin/audit', requireRole('admin'), (_req, res) =>
+  res.json({ ok: true, audit: store.audit }));
+
+// ─── 404 fallback ───
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Not found', path: req.path }));
+
+// ═══════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════
 
 async function boot() {
   try {
@@ -788,7 +1132,9 @@ async function boot() {
 
   cache = { updatedAt: Date.now(), items: publicStories(), sources: {} };
 
-  app.listen(PORT, '0.0.0.0', () => console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT}`));
+  app.listen(PORT, '0.0.0.0', () =>
+    console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT}`)
+  );
 
   refreshNews().catch(e => console.error('[boot news]', e.message));
   setInterval(() => refreshNews().catch(e => console.error('[refresh]', e.message)), 60 * 1000);
