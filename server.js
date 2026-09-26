@@ -15,6 +15,7 @@ const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGIN || '')
   .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'uploads';
+const VISITOR_COOKIE = 'tvr_visitor';
 
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
   console.error('FATAL: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set.');
@@ -31,7 +32,6 @@ const parser = new Parser({
 
 app.set('trust proxy', 1);
 
-// ─── CORS ───
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allowed = FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS.includes(origin) : !!origin;
@@ -49,10 +49,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '3mb' }));
 app.use(express.urlencoded({ extended: true, limit: '512kb' }));
 
-// ─── Feeds ───
 const BUILTIN_FEEDS = [
   ['PUNCH', 'Nigeria', 'Nigeria', 'https://rss.punchng.com/v1/category/latest_news'],
   ['PUNCH Politics', 'Nigeria', 'Politics', 'https://rss.punchng.com/v1/category/politics'],
@@ -100,9 +99,7 @@ const DEFAULT_SETTINGS = {
   site: {
     title: 'THE VOICE REPORTER',
     tagline: 'REAL NEWS • NIGERIA • AFRICA • WORLD',
-    tickerEnabled: true,
-    tickerSpeed: 72,
-    autoRefreshSeconds: 20
+    tickerEnabled: true, tickerSpeed: 72, autoRefreshSeconds: 20
   },
   sections: {
     latest: true, nigeria: true, politics: true, business: true,
@@ -148,17 +145,14 @@ function decodeHtml(input = '') {
 }
 function normalizeTitle(v = '') { return String(v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 
-// ─── Store ───
 function freshStore() {
   return {
     version: 4,
     settings: clone(DEFAULT_SETTINGS),
     sources: { custom: [], overrides: {} },
-    stories: [],
-    writers: [],
+    stories: [], writers: [],
     admin: { username: 'admin', passwordHash: hashPassword(process.env.ADMIN_PASSWORD || '463946') },
-    audit: [],
-    updatedAt: now()
+    audit: [], updatedAt: now()
   };
 }
 function normalizeStore(s) {
@@ -194,7 +188,6 @@ async function loadStoreFromSupabase() {
   if (!data) return null;
   return normalizeStore(data.data);
 }
-
 async function saveStoreNow() {
   store.updatedAt = now();
   if (store.stories.length > 400) store.stories.length = 400;
@@ -203,7 +196,6 @@ async function saveStoreNow() {
   const { error } = await supabase.from('store').upsert(payload, { onConflict: 'id' });
   if (error) throw new Error(error.message);
 }
-
 function saveStore() {
   if (saveTimer) return;
   saveTimer = setTimeout(async () => {
@@ -215,11 +207,25 @@ function saveStore() {
   }, 800);
 }
 
-// ─── Sessions ───
+// ─── Sessions (admin + writer + visitor all live here) ───
 const sessions = new Map();
+
+function readCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const [k, ...rest] = part.trim().split('=');
+    if (k === name) return decodeURIComponent(rest.join('='));
+  }
+  return '';
+}
+
 function issueSession(user) {
   const token = crypto.randomBytes(32).toString('hex');
   sessions.set(token, { ...user, expires: Date.now() + 1000 * 60 * 60 * 12 });
+  return token;
+}
+function issueVisitorSession(user) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { ...user, type: 'visitor', expires: Date.now() + 1000 * 60 * 60 * 24 * 30 });
   return token;
 }
 function pruneSessions() {
@@ -230,18 +236,21 @@ function pruneSessions() {
   }
   if (removed) console.log(`[sessions] cleaned ${removed}`);
 }
-function readCookie(req, name) {
-  for (const part of String(req.headers.cookie || '').split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k === name) return decodeURIComponent(rest.join('='));
-  }
-  return '';
-}
 function auth(req) {
   const token = readCookie(req, 'tvr_session');
   if (!token) return null;
   const s = sessions.get(token);
   if (!s || s.expires < Date.now()) { sessions.delete(token); return null; }
+  return s;
+}
+function authVisitor(req) {
+  const token = readCookie(req, VISITOR_COOKIE);
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s || s.type !== 'visitor' || s.expires < Date.now()) {
+    if (s) sessions.delete(token);
+    return null;
+  }
   return s;
 }
 function requireRole(...roles) {
@@ -264,18 +273,29 @@ function clearSession(res) {
   const secure = (cross || process.env.NODE_ENV === 'production') ? '; Secure' : '';
   res.setHeader('Set-Cookie', `tvr_session=; Path=/; HttpOnly; SameSite=${sameSite}${secure}; Max-Age=0`);
 }
+function setVisitorCookie(res, token) {
+  const cross = FRONTEND_ORIGINS.length > 0;
+  const sameSite = cross ? 'None' : 'Lax';
+  const secure = (cross || process.env.NODE_ENV === 'production') ? '; Secure' : '';
+  const maxAge = 60 * 60 * 24 * 30;
+  res.setHeader('Set-Cookie', `${VISITOR_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=${sameSite}${secure}; Max-Age=${maxAge}`);
+}
+function clearVisitorCookie(res) {
+  const cross = FRONTEND_ORIGINS.length > 0;
+  const sameSite = cross ? 'None' : 'Lax';
+  const secure = (cross || process.env.NODE_ENV === 'production') ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${VISITOR_COOKIE}=; Path=/; HttpOnly; SameSite=${sameSite}${secure}; Max-Age=0`);
+}
 function audit(action, req, meta = {}) {
   store.audit.unshift({
     id: uid('audit'), action, at: now(),
     actor: { id: req?.user?.id || 'system', username: req?.user?.username || 'system', role: req?.user?.role || 'system' },
-    ip: req?.ip || '',
-    meta
+    ip: req?.ip || '', meta
   });
   if (store.audit.length > 80) store.audit.length = 80;
   saveStore();
 }
 
-// ─── Feed helpers ───
 function categoryFallback(category) {
   const key = Object.keys(store.settings.fallbacks || {}).find(k => k.toLowerCase() === String(category || 'News').toLowerCase()) || 'News';
   return store.settings.fallbacks?.[key] || REMOTE_FALLBACKS.News;
@@ -330,13 +350,9 @@ async function fetchFeed(feed) {
         title: decodeHtml(item.title || 'Untitled'),
         link: item.link || '#',
         description: cleanDescription(item),
-        image,
-        fallbackImage: categoryFallback(category),
-        imageIsFallback: !original,
-        video: itemVideo(item),
-        source: feed.name,
-        region: feed.region,
-        category,
+        image, fallbackImage: categoryFallback(category),
+        imageIsFallback: !original, video: itemVideo(item),
+        source: feed.name, region: feed.region, category,
         publishedAt: Number.isNaN(date.getTime()) ? now() : date.toISOString(),
         editorial: false, isBreaking: false, isDeveloping: false, isUpdated: false, featured: false
       };
@@ -356,10 +372,8 @@ function publicStories() {
     body: s.body,
     image: s.image || categoryFallback(s.category),
     fallbackImage: categoryFallback(s.category),
-    imageIsFallback: !s.image,
-    video: s.video || '',
-    source: 'THE VOICE REPORTER',
-    sourceAttribution: s.sourceAttribution || '',
+    imageIsFallback: !s.image, video: s.video || '',
+    source: 'THE VOICE REPORTER', sourceAttribution: s.sourceAttribution || '',
     author: s.author, region: s.region, category: s.category,
     publishedAt: s.publishedAt || s.updatedAt || s.createdAt,
     updatedAt: s.updatedAt,
@@ -374,10 +388,7 @@ let cache = { updatedAt: 0, items: [], sources: {} };
 let refreshing = false;
 
 async function refreshNews() {
-  if (refreshing) {
-    console.log('[refresh] skipped — already running');
-    return cache;
-  }
+  if (refreshing) return cache;
   refreshing = true;
   try {
     const feeds = getFeeds();
@@ -401,9 +412,7 @@ async function refreshNews() {
     cache = { updatedAt: Date.now(), items, sources };
     rss = null;
     return cache;
-  } finally {
-    refreshing = false;
-  }
+  } finally { refreshing = false; }
 }
 
 function sanitizeStoryInput(body) {
@@ -428,10 +437,8 @@ function sanitizeStoryInput(body) {
     seoDescription: safeText(body.seoDescription, 320),
     status: ['draft', 'submitted', 'published', 'rejected', 'scheduled'].includes(body.status) ? body.status : 'draft',
     scheduledAt: body.scheduledAt || null,
-    isBreaking: !!body.isBreaking,
-    isDeveloping: !!body.isDeveloping,
-    isUpdated: !!body.isUpdated,
-    featured: !!body.featured,
+    isBreaking: !!body.isBreaking, isDeveloping: !!body.isDeveloping,
+    isUpdated: !!body.isUpdated, featured: !!body.featured,
     sourceAttribution: safeText(body.sourceAttribution, 600)
   };
 }
@@ -450,9 +457,7 @@ const upload = multer({
 
 async function proxyJson(endpoint, payload) {
   const r = await fetch(`${PROXY_URL}${endpoint}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
   });
   const text = await r.text();
   let data;
@@ -500,11 +505,8 @@ function publicNewsPayload(limit = 180) {
 // ═══════════════════════════════════════════
 
 app.get('/', (_req, res) => res.json({
-  ok: true,
-  service: 'THE VOICE REPORTER API',
-  version: 4,
-  storage: 'supabase',
-  health: '/api/health'
+  ok: true, service: 'THE VOICE REPORTER API', version: 4,
+  storage: 'supabase', health: '/api/health'
 }));
 
 app.get('/api/config', (_req, res) => res.json({ ok: true, settings: store.settings }));
@@ -515,9 +517,7 @@ app.post('/api/refresh', async (_req, res) => {
   try {
     const c = await refreshNews();
     res.json({ ok: true, updatedAt: new Date(c.updatedAt).toISOString(), stories: c.items.length, sources: c.sources });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/api/health', async (_req, res) => {
@@ -537,25 +537,26 @@ app.get('/api/health', async (_req, res) => {
     articleCacheSize = count || 0;
   } catch {}
 
+  let visitorCount = null;
+  try {
+    const { count } = await supabase.from('visitors').select('*', { count: 'exact', head: true });
+    visitorCount = count || 0;
+  } catch {}
+
   const mem = process.memoryUsage();
   res.json({
-    ok: true,
-    service: 'THE VOICE REPORTER',
-    version: 4,
-    serverTime: now(),
+    ok: true, service: 'THE VOICE REPORTER', version: 4, serverTime: now(),
     newsUpdatedAt: cache.updatedAt ? new Date(cache.updatedAt).toISOString() : null,
-    feeds: getFeeds().length,
-    feedStories: cache.items.length,
+    feeds: getFeeds().length, feedStories: cache.items.length,
     publishedStories: store.stories.filter(s => s.status === 'published').length,
     writers: store.writers.length,
+    visitors: visitorCount,
     sessions: sessions.size,
     articleCache: articleCacheSize,
     proxy: { url: PROXY_URL, reachable: proxyReachable },
     supabase: { ok: supabaseOk, error: supabaseError, bucket: SUPABASE_BUCKET },
     cors: { allowedOrigins: FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS : ['(any)'] },
-    storage: 'supabase',
-    parser: 'linkedom',
-    emojis: ALLOWED_EMOJIS,
+    storage: 'supabase', parser: 'linkedom', emojis: ALLOWED_EMOJIS,
     memory: {
       rssMb: +(mem.rss / 1048576).toFixed(1),
       heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1),
@@ -566,7 +567,7 @@ app.get('/api/health', async (_req, res) => {
 });
 
 // ═══════════════════════════════════════════
-// ARTICLE CACHE — Supabase
+// ARTICLE CACHE
 // ═══════════════════════════════════════════
 
 function normalizeArticleUrl(url) {
@@ -575,40 +576,29 @@ function normalizeArticleUrl(url) {
     u.hash = '';
     ['utm_source','utm_medium','utm_campaign','utm_content','utm_term','fbclid','gclid','ref','mc_cid','mc_eid','_ga','_gl']
       .forEach(k => u.searchParams.delete(k));
-    let s = u.toString();
-    s = s.replace(/\/$/, '');
-    return s;
+    return u.toString().replace(/\/$/, '');
   } catch { return String(url).trim(); }
 }
-
 function articleHash(url) {
   return crypto.createHash('sha256').update(normalizeArticleUrl(url)).digest('hex');
 }
-
 function articleToResponse(a) {
   return {
-    title: a.title || '',
-    byline: a.byline || '',
-    excerpt: a.excerpt || '',
-    content: a.content || '',
-    siteName: a.site_name || '',
-    publishedTime: a.published_time || '',
-    url: a.url || ''
+    title: a.title || '', byline: a.byline || '', excerpt: a.excerpt || '',
+    content: a.content || '', siteName: a.site_name || '',
+    publishedTime: a.published_time || '', url: a.url || ''
   };
 }
-
 async function getCachedArticle(url) {
   try {
     const hash = articleHash(url);
-    const { data, error } = await supabase.from('articles')
-      .select('*').eq('url_hash', hash).maybeSingle();
+    const { data, error } = await supabase.from('articles').select('*').eq('url_hash', hash).maybeSingle();
     if (error || !data) return null;
     const age = Date.now() - new Date(data.fetched_at).getTime();
     const stale = age > 7 * 24 * 60 * 60 * 1000;
     return { ...data, stale };
   } catch { return null; }
 }
-
 async function putCachedArticle(url, article) {
   try {
     const content = String(article.content || '');
@@ -668,10 +658,7 @@ async function processQueue() {
   const { fn, resolve, reject } = parseQueue.shift();
   try { resolve(await fn()); }
   catch (e) { reject(e); }
-  finally {
-    parsing = false;
-    setImmediate(processQueue);
-  }
+  finally { parsing = false; setImmediate(processQueue); }
 }
 
 async function fetchExternalArticle(url) {
@@ -680,30 +667,20 @@ async function fetchExternalArticle(url) {
   if (isPrivateHost(u.hostname)) throw new Error('This host is not allowed');
   const r = await fetch(u.href, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; The Voice Reporter Reader/4.0)' },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(15000)
+    redirect: 'follow', signal: AbortSignal.timeout(15000)
   });
   if (!r.ok) throw new Error(`Publisher returned ${r.status}`);
   const html = await r.text();
-
   const { document } = parseHTML(html);
-  try {
-    document.baseURI = r.url;
-    document.documentURI = r.url;
-  } catch (_) {}
-
+  try { document.baseURI = r.url; document.documentURI = r.url; } catch (_) {}
   const article = new Readability(document).parse();
-  if (!article || !article.textContent || article.textContent.trim().length < 80) {
+  if (!article || !article.textContent || article.textContent.trim().length < 80)
     throw new Error('Could not extract a readable article');
-  }
   const out = {
-    title: article.title || '',
-    byline: article.byline || '',
-    excerpt: article.excerpt || '',
-    content: article.content || '',
+    title: article.title || '', byline: article.byline || '',
+    excerpt: article.excerpt || '', content: article.content || '',
     siteName: article.siteName || new URL(r.url).hostname,
-    publishedTime: article.publishedTime || '',
-    url: r.url
+    publishedTime: article.publishedTime || '', url: r.url
   };
   try { document.defaultView = null; } catch (_) {}
   return out;
@@ -712,21 +689,15 @@ async function fetchExternalArticle(url) {
 app.get('/api/article', async (req, res) => {
   const url = safeText(req.query.url, 4000);
   if (!url) return res.status(400).json({ ok: false, error: 'Article URL is required.' });
-
   const cached = await getCachedArticle(url);
-
-  if (cached && !cached.stale) {
+  if (cached && !cached.stale)
     return res.json({ ok: true, article: articleToResponse(cached), cached: true });
-  }
-
   try {
     const article = await withParseLock(() => fetchExternalArticle(url));
     putCachedArticle(url, article).catch(() => {});
     res.json({ ok: true, article, cached: false });
   } catch (e) {
-    if (cached) {
-      return res.json({ ok: true, article: articleToResponse(cached), cached: true, stale: true });
-    }
+    if (cached) return res.json({ ok: true, article: articleToResponse(cached), cached: true, stale: true });
     res.status(502).json({ ok: false, error: e.message });
   }
 });
@@ -738,7 +709,7 @@ app.get('/api/story/:id', (req, res) => {
 });
 
 // ═══════════════════════════════════════════
-// ENGAGEMENT (likes + reactions + comments)
+// ENGAGEMENT
 // ═══════════════════════════════════════════
 
 let engagementCache = { at: 0, likes: {}, comments: {}, reactions: {} };
@@ -753,26 +724,18 @@ app.get('/api/engagement-summary', async (_req, res) => {
         reactions: engagementCache.reactions || {}
       });
     }
-    const [
-      { data: likeRows },
-      { data: commentRows },
-      { data: reactionRows }
-    ] = await Promise.all([
+    const [{ data: likeRows }, { data: commentRows }, { data: reactionRows }] = await Promise.all([
       supabase.from('likes').select('story_id'),
       supabase.from('comments').select('story_id').eq('status', 'approved'),
       supabase.from('reactions').select('story_id')
     ]);
-    const likes = {};
-    const comments = {};
-    const reactions = {};
+    const likes = {}, comments = {}, reactions = {};
     for (const r of likeRows || []) likes[r.story_id] = (likes[r.story_id] || 0) + 1;
     for (const r of commentRows || []) comments[r.story_id] = (comments[r.story_id] || 0) + 1;
     for (const r of reactionRows || []) reactions[r.story_id] = (reactions[r.story_id] || 0) + 1;
     engagementCache = { at: Date.now(), likes, comments, reactions };
     res.json({ ok: true, likes, comments, reactions });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/api/engagement/:storyId', async (req, res) => {
@@ -788,14 +751,13 @@ app.get('/api/engagement/:storyId', async (req, res) => {
         ? supabase.from('likes').select('id').eq('story_id', storyId).eq('visitor_id', visitorId).maybeSingle()
         : Promise.resolve({ data: null }),
       supabase.from('comments')
-        .select('id, name, body, visitor_id, parent_id, reply_to_name, created_at')
+        .select('id, name, body, visitor_id, parent_id, reply_to_name, created_at, avatar_url, verified')
         .eq('story_id', storyId).eq('status', 'approved')
         .order('created_at', { ascending: true })
         .limit(300),
       supabase.from('reactions').select('emoji, visitor_id').eq('story_id', storyId)
     ]);
 
-    // ─── Reactions aggregation ───
     const reactionCounts = {};
     let myReaction = null;
     for (const r of reactionsRes.data || []) {
@@ -803,15 +765,13 @@ app.get('/api/engagement/:storyId', async (req, res) => {
       if (visitorId && r.visitor_id === visitorId) myReaction = r.emoji;
     }
 
-    // ─── Comments aggregation ───
     const rows = commentRowsRes.data || [];
     const commentIds = rows.map(c => c.id);
 
     let allLikes = [];
     if (commentIds.length) {
       const { data } = await supabase.from('comment_likes')
-        .select('comment_id, visitor_id')
-        .in('comment_id', commentIds);
+        .select('comment_id, visitor_id').in('comment_id', commentIds);
       allLikes = data || [];
     }
 
@@ -831,6 +791,8 @@ app.get('/api/engagement/:storyId', async (req, res) => {
         body: c.body,
         at: c.created_at,
         replyToName: c.reply_to_name || null,
+        avatarUrl: c.avatar_url || null,
+        verified: !!c.verified,
         likes: likeCounts[c.id] || 0,
         liked: likedSet.has(c.id),
         isMine: visitorId ? c.visitor_id === visitorId : false,
@@ -839,11 +801,8 @@ app.get('/api/engagement/:storyId', async (req, res) => {
       };
     }
     for (const c of rows) {
-      if (c.parent_id && byId[c.parent_id]) {
-        byId[c.parent_id].replies.push(byId[c.id]);
-      } else {
-        topLevel.push(byId[c.id]);
-      }
+      if (c.parent_id && byId[c.parent_id]) byId[c.parent_id].replies.push(byId[c.id]);
+      else topLevel.push(byId[c.id]);
     }
 
     if (sort === 'top') {
@@ -857,10 +816,7 @@ app.get('/api/engagement/:storyId', async (req, res) => {
     } else {
       topLevel.sort((a, b) => new Date(b.at) - new Date(a.at));
     }
-
-    for (const t of topLevel) {
-      t.replies.sort((a, b) => new Date(a.at) - new Date(b.at));
-    }
+    for (const t of topLevel) t.replies.sort((a, b) => new Date(a.at) - new Date(b.at));
 
     res.json({
       ok: true,
@@ -873,45 +829,33 @@ app.get('/api/engagement/:storyId', async (req, res) => {
       reactionTotal: (reactionsRes.data || []).length,
       emojis: ALLOWED_EMOJIS
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ─── Story like ───
 app.post('/api/like', async (req, res) => {
   try {
     const storyId = safeText(req.body?.storyId, 500);
     const visitorId = safeText(req.body?.visitorId, 80);
     if (!storyId || !visitorId) return res.status(400).json({ ok: false, error: 'Missing story or visitor' });
-
     const { data: existing } = await supabase.from('likes')
       .select('id').eq('story_id', storyId).eq('visitor_id', visitorId).maybeSingle();
-
-    if (existing) {
-      await supabase.from('likes').delete().eq('id', existing.id);
-    } else {
+    if (existing) await supabase.from('likes').delete().eq('id', existing.id);
+    else {
       const { error } = await supabase.from('likes').insert({ story_id: storyId, visitor_id: visitorId });
       if (error) throw new Error(error.message);
     }
-
     engagementCache.at = 0;
     const { count } = await supabase.from('likes')
       .select('*', { count: 'exact', head: true }).eq('story_id', storyId);
-
     res.json({ ok: true, liked: !existing, likes: count || 0 });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ─── Reaction (multi-emoji) ───
 app.post('/api/react', async (req, res) => {
   try {
     const storyId = safeText(req.body?.storyId, 500);
     const visitorId = safeText(req.body?.visitorId, 80);
     const emoji = safeText(req.body?.emoji, 8);
-
     if (!storyId || !visitorId) return res.status(400).json({ ok: false, error: 'Missing story or visitor' });
     if (!ALLOWED_EMOJIS.includes(emoji)) return res.status(400).json({ ok: false, error: 'Invalid emoji' });
 
@@ -927,68 +871,66 @@ app.post('/api/react', async (req, res) => {
       if (error) throw new Error(error.message);
       action = 'changed';
     } else {
-      const { error } = await supabase.from('reactions')
-        .insert({ story_id: storyId, visitor_id: visitorId, emoji });
+      const { error } = await supabase.from('reactions').insert({ story_id: storyId, visitor_id: visitorId, emoji });
       if (error) throw new Error(error.message);
     }
 
     engagementCache.at = 0;
-
-    const { data: rows } = await supabase.from('reactions')
-      .select('emoji, visitor_id').eq('story_id', storyId);
-
+    const { data: rows } = await supabase.from('reactions').select('emoji, visitor_id').eq('story_id', storyId);
     const counts = {};
-    let mine = null;
-    let total = 0;
+    let mine = null, total = 0;
     for (const r of rows || []) {
       counts[r.emoji] = (counts[r.emoji] || 0) + 1;
       total += 1;
       if (r.visitor_id === visitorId) mine = r.emoji;
     }
-
     res.json({ ok: true, action, reactions: counts, mine, total, emojis: ALLOWED_EMOJIS });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ─── Comment like ───
 app.post('/api/comment-like', async (req, res) => {
   try {
     const commentId = safeText(req.body?.commentId, 100);
     const visitorId = safeText(req.body?.visitorId, 80);
-    if (!commentId || !visitorId)
-      return res.status(400).json({ ok: false, error: 'Missing comment or visitor' });
-
+    if (!commentId || !visitorId) return res.status(400).json({ ok: false, error: 'Missing comment or visitor' });
     const { data: existing } = await supabase.from('comment_likes')
       .select('id').eq('comment_id', commentId).eq('visitor_id', visitorId).maybeSingle();
-
-    if (existing) {
-      await supabase.from('comment_likes').delete().eq('id', existing.id);
-    } else {
-      const { error } = await supabase.from('comment_likes')
-        .insert({ comment_id: commentId, visitor_id: visitorId });
+    if (existing) await supabase.from('comment_likes').delete().eq('id', existing.id);
+    else {
+      const { error } = await supabase.from('comment_likes').insert({ comment_id: commentId, visitor_id: visitorId });
       if (error) throw new Error(error.message);
     }
-
     const { count } = await supabase.from('comment_likes')
       .select('*', { count: 'exact', head: true }).eq('comment_id', commentId);
-
     res.json({ ok: true, liked: !existing, likes: count || 0 });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ─── Comment + reply ───
+// Post comment (supports visitor accounts)
 app.post('/api/comment', async (req, res) => {
   try {
     const storyId = safeText(req.body?.storyId, 500);
-    const name = safeText(req.body?.name || 'Anonymous', 60) || 'Anonymous';
+    let name = safeText(req.body?.name || 'Anonymous', 60) || 'Anonymous';
     const body = safeText(req.body?.body, 2000);
-    const visitorId = safeText(req.body?.visitorId, 80);
+    let visitorId = safeText(req.body?.visitorId, 80);
     const parentId = safeText(req.body?.parentId, 100) || null;
     const replyToName = safeText(req.body?.replyToName, 60) || null;
+    let avatarUrl = null;
+    let verified = false;
+
+    // Check for authenticated visitor session
+    const session = authVisitor(req);
+    if (session) {
+      // Override with account info
+      const { data: acct } = await supabase.from('visitors').select('*').eq('id', session.id).maybeSingle();
+      if (acct && acct.status === 'active') {
+        name = acct.display_name;
+        visitorId = 'acct_' + acct.id;
+        avatarUrl = acct.avatar_url || null;
+        verified = true;
+        await supabase.from('visitors').update({ last_seen_at: now() }).eq('id', acct.id);
+      }
+    }
 
     if (!storyId || !body) return res.status(400).json({ ok: false, error: 'Story and comment are required' });
     if (body.length < 2) return res.status(400).json({ ok: false, error: 'Comment is too short' });
@@ -1003,7 +945,7 @@ app.post('/api/comment', async (req, res) => {
         return res.status(429).json({ ok: false, error: 'You are commenting too fast. Try again in a bit.' });
     }
 
-    const insert = { story_id: storyId, name, body, visitor_id: visitorId, status: 'approved' };
+    const insert = { story_id: storyId, name, body, visitor_id: visitorId, status: 'approved', avatar_url: avatarUrl, verified };
     if (parentId) insert.parent_id = parentId;
     if (replyToName) insert.reply_to_name = replyToName;
 
@@ -1015,21 +957,15 @@ app.post('/api/comment', async (req, res) => {
     res.json({
       ok: true,
       comment: {
-        id: data.id,
-        name: data.name,
-        body: data.body,
-        at: data.created_at,
-        parentId: data.parent_id || null,
-        replyToName: data.reply_to_name || null,
+        id: data.id, name: data.name, body: data.body, at: data.created_at,
+        parentId: data.parent_id || null, replyToName: data.reply_to_name || null,
+        avatarUrl: data.avatar_url || null, verified: !!data.verified,
         likes: 0, liked: false, isMine: true, replies: []
       }
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ─── Delete own comment ───
 app.delete('/api/comment/:id', async (req, res) => {
   try {
     const visitorId = safeText(req.query.visitor, 80);
@@ -1038,17 +974,203 @@ app.delete('/api/comment/:id', async (req, res) => {
     if (!c) return res.status(404).json({ ok: false, error: 'Comment not found' });
     if (!visitorId || c.visitor_id !== visitorId)
       return res.status(403).json({ ok: false, error: 'You can only delete your own comments' });
-
     await supabase.from('comments').delete().eq('id', req.params.id);
     engagementCache.at = 0;
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ═══════════════════════════════════════════
-// AUTH
+// VISITOR ACCOUNTS
+// ═══════════════════════════════════════════
+
+app.post('/api/visitor/register', async (req, res) => {
+  try {
+    const username = safeText(req.body?.username, 40).toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const displayName = safeText(req.body?.displayName, 60);
+    const email = safeText(req.body?.email, 160).toLowerCase();
+    const password = String(req.body?.password || '');
+
+    if (!username || username.length < 3) return res.status(400).json({ ok: false, error: 'Username must be at least 3 characters (letters, numbers, underscore).' });
+    if (!displayName) return res.status(400).json({ ok: false, error: 'Display name is required.' });
+    if (password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters.' });
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ ok: false, error: 'Invalid email address.' });
+
+    const { data: existingUser } = await supabase.from('visitors').select('id').eq('username', username).maybeSingle();
+    if (existingUser) return res.status(409).json({ ok: false, error: 'That username is already taken.' });
+    if (email) {
+      const { data: existingEmail } = await supabase.from('visitors').select('id').eq('email', email).maybeSingle();
+      if (existingEmail) return res.status(409).json({ ok: false, error: 'That email is already registered.' });
+    }
+
+    const passwordHash = hashPassword(password);
+    const { data, error } = await supabase.from('visitors').insert({
+      username, display_name: displayName, email: email || null,
+      password_hash: passwordHash, avatar_url: null, bio: null,
+      status: 'active', last_seen_at: now()
+    }).select().single();
+    if (error) throw new Error(error.message);
+
+    const token = issueVisitorSession({ id: data.id, username: data.username, display_name: data.display_name });
+    setVisitorCookie(res, token);
+
+    res.json({
+      ok: true,
+      user: {
+        id: data.id, username: data.username, displayName: data.display_name,
+        email: data.email, avatarUrl: data.avatar_url, bio: data.bio
+      }
+    });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/visitor/login', async (req, res) => {
+  try {
+    const identifier = safeText(req.body?.identifier, 160).toLowerCase();
+    const password = String(req.body?.password || '');
+    if (!identifier || !password) return res.status(400).json({ ok: false, error: 'Enter your username/email and password.' });
+
+    const { data: user } = await supabase.from('visitors')
+      .select('*').or(`username.eq.${identifier},email.eq.${identifier}`).maybeSingle();
+
+    if (!user || user.status !== 'active')
+      return res.status(401).json({ ok: false, error: 'Invalid credentials.' });
+    if (!verifyPassword(password, user.password_hash))
+      return res.status(401).json({ ok: false, error: 'Invalid credentials.' });
+
+    await supabase.from('visitors').update({ last_seen_at: now() }).eq('id', user.id);
+
+    const token = issueVisitorSession({ id: user.id, username: user.username, display_name: user.display_name });
+    setVisitorCookie(res, token);
+
+    res.json({
+      ok: true,
+      user: {
+        id: user.id, username: user.username, displayName: user.display_name,
+        email: user.email, avatarUrl: user.avatar_url, bio: user.bio
+      }
+    });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/visitor/logout', (req, res) => {
+  const token = readCookie(req, VISITOR_COOKIE);
+  if (token) sessions.delete(token);
+  clearVisitorCookie(res);
+  res.json({ ok: true });
+});
+
+app.get('/api/visitor/me', async (req, res) => {
+  const s = authVisitor(req);
+  if (!s) return res.json({ ok: true, authenticated: false, user: null });
+  try {
+    const { data: user } = await supabase.from('visitors').select('*').eq('id', s.id).maybeSingle();
+    if (!user || user.status !== 'active') {
+      clearVisitorCookie(res);
+      return res.json({ ok: true, authenticated: false, user: null });
+    }
+    res.json({
+      ok: true, authenticated: true,
+      user: {
+        id: user.id, username: user.username, displayName: user.display_name,
+        email: user.email, avatarUrl: user.avatar_url, bio: user.bio,
+        createdAt: user.created_at
+      }
+    });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.patch('/api/visitor/profile', async (req, res) => {
+  const s = authVisitor(req);
+  if (!s) return res.status(401).json({ ok: false, error: 'Sign in first.' });
+  try {
+    const patch = {};
+    if (req.body.displayName !== undefined) {
+      const dn = safeText(req.body.displayName, 60);
+      if (!dn) return res.status(400).json({ ok: false, error: 'Display name cannot be empty.' });
+      patch.display_name = dn;
+    }
+    if (req.body.bio !== undefined) patch.bio = safeText(req.body.bio, 240);
+    if (req.body.email !== undefined) {
+      const email = safeText(req.body.email, 160).toLowerCase();
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+        return res.status(400).json({ ok: false, error: 'Invalid email.' });
+      if (email) {
+        const { data: existingEmail } = await supabase.from('visitors')
+          .select('id').eq('email', email).neq('id', s.id).maybeSingle();
+        if (existingEmail) return res.status(409).json({ ok: false, error: 'Email already registered.' });
+      }
+      patch.email = email || null;
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ ok: false, error: 'Nothing to update.' });
+    patch.updated_at = now();
+
+    const { error } = await supabase.from('visitors').update(patch).eq('id', s.id);
+    if (error) throw new Error(error.message);
+
+    if (patch.display_name) {
+      const token = readCookie(req, VISITOR_COOKIE);
+      const existing = sessions.get(token);
+      if (existing) sessions.set(token, { ...existing, display_name: patch.display_name });
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/visitor/avatar', async (req, res) => {
+  const s = authVisitor(req);
+  if (!s) return res.status(401).json({ ok: false, error: 'Sign in first.' });
+  try {
+    const dataUrl = String(req.body?.dataUrl || '');
+    const m = dataUrl.match(/^data:image\/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) return res.status(400).json({ ok: false, error: 'Invalid image format.' });
+    const buf = Buffer.from(m[2], 'base64');
+    if (buf.length > 400 * 1024) return res.status(400).json({ ok: false, error: 'Image too large (400 KB max).' });
+
+    const ext = m[1] === 'jpeg' ? 'jpg' : m[1];
+    const filename = `avatars/${s.id}_${Date.now()}.${ext}`;
+    const contentType = `image/${m[1] === 'jpg' ? 'jpeg' : m[1]}`;
+
+    const { error: upErr } = await supabase.storage.from(SUPABASE_BUCKET).upload(filename, buf, { contentType, upsert: true });
+    if (upErr) throw new Error(upErr.message);
+    const { data: { publicUrl } } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(filename);
+
+    await supabase.from('visitors').update({ avatar_url: publicUrl, updated_at: now() }).eq('id', s.id);
+    res.json({ ok: true, avatarUrl: publicUrl });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/visitor/password', async (req, res) => {
+  const s = authVisitor(req);
+  if (!s) return res.status(401).json({ ok: false, error: 'Sign in first.' });
+  try {
+    const current = String(req.body?.currentPassword || '');
+    const next = String(req.body?.newPassword || '');
+    if (next.length < 6) return res.status(400).json({ ok: false, error: 'New password must be at least 6 characters.' });
+    const { data: user } = await supabase.from('visitors').select('password_hash').eq('id', s.id).maybeSingle();
+    if (!user || !verifyPassword(current, user.password_hash))
+      return res.status(401).json({ ok: false, error: 'Current password is incorrect.' });
+    await supabase.from('visitors').update({ password_hash: hashPassword(next), updated_at: now() }).eq('id', s.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+app.get('/api/visitor/comments', async (req, res) => {
+  const s = authVisitor(req);
+  if (!s) return res.status(401).json({ ok: false, error: 'Sign in first.' });
+  try {
+    const { data, error } = await supabase.from('comments')
+      .select('id, story_id, body, status, created_at')
+      .eq('visitor_id', 'acct_' + s.id)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, comments: data || [] });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ═══════════════════════════════════════════
+// AUTH (admin + writer)
 // ═══════════════════════════════════════════
 
 app.post('/api/auth/admin', (req, res) => {
@@ -1066,8 +1188,7 @@ app.post('/api/auth/writer', (req, res) => {
   const w = store.writers.find(x => (x.username === username || x.email === username) && x.status === 'active');
   if (!w || !verifyPassword(password, w.passwordHash))
     return res.status(401).json({ ok: false, error: 'Invalid writer credentials' });
-  w.lastLoginAt = now();
-  saveStore();
+  w.lastLoginAt = now(); saveStore();
   const role = w.role === 'editor' ? 'editor' : 'writer';
   const token = issueSession({ id: w.id, username: w.username, role, name: w.name });
   setSession(res, token);
@@ -1077,11 +1198,7 @@ app.post('/api/auth/writer', (req, res) => {
 
 app.get('/api/auth/me', (req, res) => {
   const u = auth(req);
-  res.json({
-    ok: true,
-    authenticated: !!u,
-    user: u ? { id: u.id, username: u.username, name: u.name || '', role: u.role } : null
-  });
+  res.json({ ok: true, authenticated: !!u, user: u ? { id: u.id, username: u.username, name: u.name || '', role: u.role } : null });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -1091,84 +1208,62 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-// ═══════════════════════════════════════════
 // AI PROXY
-// ═══════════════════════════════════════════
-
 app.post('/api/ai/:mode', async (req, res) => {
   const mode = req.params.mode === 'ask' ? 'chat' : req.params.mode;
-  const allowed = {
-    chat: store.settings.ai.chat, think: store.settings.ai.think,
-    expert: store.settings.ai.expert, vision: store.settings.ai.vision
-  };
+  const allowed = { chat: store.settings.ai.chat, think: store.settings.ai.think, expert: store.settings.ai.expert, vision: store.settings.ai.vision };
   if (!store.settings.ai.enabled || allowed[mode] === false)
     return res.status(403).json({ ok: false, error: 'This AI feature is disabled.' });
-  try { res.json(await proxyJson(`/${['chat', 'think', 'expert', 'vision'].includes(mode) ? mode : 'chat'}`, req.body || {})); }
+  try { res.json(await proxyJson(`/${['chat','think','expert','vision'].includes(mode) ? mode : 'chat'}`, req.body || {})); }
   catch (e) { res.status(502).json({ ok: false, error: e.message }); }
 });
-
 app.post('/api/ai/search', async (req, res) => {
   if (!store.settings.ai.enabled || store.settings.ai.search === false)
     return res.status(403).json({ ok: false, error: 'AI search is disabled.' });
   try { res.json(await proxyJson('/search', req.body || {})); }
   catch (e) { res.status(502).json({ ok: false, error: e.message }); }
 });
-
 app.post('/api/ai/fetch-url', async (req, res) => {
   try { res.json(await proxyJson('/fetch-url', req.body || {})); }
   catch (e) { res.status(502).json({ ok: false, error: e.message }); }
 });
 
-// ═══════════════════════════════════════════
 // UPLOADS
-// ═══════════════════════════════════════════
-
 app.post('/api/upload', requireRole('admin', 'editor', 'writer'), (req, res) => {
   upload.single('file')(req, res, async err => {
     if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE')
-        return res.status(400).json({ ok: false, error: 'File too large. Max 5 MB.' });
+      if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ ok: false, error: 'File too large. Max 5 MB.' });
       return res.status(400).json({ ok: false, error: err.message });
     }
     if (!req.file) return res.status(400).json({ ok: false, error: 'No file selected.' });
     try {
       const ext = path.extname(req.file.originalname || '').toLowerCase().replace(/[^.a-z0-9]/g, '') || '';
       const filename = `${Date.now()}_${crypto.randomBytes(8).toString('hex')}${ext}`;
-      const { error: upErr } = await supabase.storage
-        .from(SUPABASE_BUCKET)
+      const { error: upErr } = await supabase.storage.from(SUPABASE_BUCKET)
         .upload(filename, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
       if (upErr) throw new Error(upErr.message);
       const { data: { publicUrl } } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(filename);
       audit('media.upload', req, { file: filename, type: req.file.mimetype, size: req.file.size });
       req.file.buffer = null;
       res.json({ ok: true, url: publicUrl, type: req.file.mimetype, size: req.file.size, name: req.file.originalname });
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
-    }
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 });
 
-// ═══════════════════════════════════════════
 // WRITER ROUTES
-// ═══════════════════════════════════════════
-
 app.get('/api/writer/stories', requireRole('admin', 'editor', 'writer'), (req, res) => {
   let list = store.stories;
   if (req.user.role === 'writer') list = list.filter(s => s.authorId === req.user.id);
   res.json({ ok: true, stories: list.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)) });
 });
-
 app.post('/api/writer/stories', requireRole('admin', 'editor', 'writer'), async (req, res) => {
   const story = sanitizeStoryInput(req.body || {});
-  if (!story.title || !story.body)
-    return res.status(400).json({ ok: false, error: 'Headline and article body are required.' });
-  story.id = uid('story');
-  story.authorId = req.user.id;
+  if (!story.title || !story.body) return res.status(400).json({ ok: false, error: 'Headline and article body are required.' });
+  story.id = uid('story'); story.authorId = req.user.id;
   story.author = story.author || req.user.name || req.user.username;
-  story.createdAt = now();
-  story.updatedAt = now();
+  story.createdAt = now(); story.updatedAt = now();
   story.publishedAt = story.status === 'published' ? now() : null;
-  if (req.user.role === 'writer' && store.settings.publishing.writersNeedApproval && ['published', 'scheduled'].includes(story.status))
+  if (req.user.role === 'writer' && store.settings.publishing.writersNeedApproval && ['published','scheduled'].includes(story.status))
     story.status = 'submitted';
   store.stories.unshift(story);
   if (store.stories.length > 400) store.stories.length = 400;
@@ -1176,16 +1271,13 @@ app.post('/api/writer/stories', requireRole('admin', 'editor', 'writer'), async 
   try { await refreshNews(); } catch {}
   res.json({ ok: true, story });
 });
-
 app.patch('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), async (req, res) => {
   const story = store.stories.find(s => s.id === req.params.id);
   if (!story) return res.status(404).json({ ok: false, error: 'Story not found' });
-  if (!canEditStory(req.user, story))
-    return res.status(403).json({ ok: false, error: 'You cannot edit this story.' });
+  if (!canEditStory(req.user, story)) return res.status(403).json({ ok: false, error: 'You cannot edit this story.' });
   const old = story.status;
   Object.assign(story, sanitizeStoryInput({ ...story, ...req.body }), {
-    id: story.id, authorId: story.authorId, createdAt: story.createdAt,
-    updatedAt: now(), publishedAt: story.publishedAt
+    id: story.id, authorId: story.authorId, createdAt: story.createdAt, updatedAt: now(), publishedAt: story.publishedAt
   });
   if (story.status === 'published' && old !== 'published') story.publishedAt = now();
   if (req.user.role === 'writer' && store.settings.publishing.writersNeedApproval && old === 'published' && !store.settings.publishing.allowWriterEditPublished)
@@ -1194,23 +1286,18 @@ app.patch('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), a
   try { await refreshNews(); } catch {}
   res.json({ ok: true, story });
 });
-
 app.delete('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), async (req, res) => {
   const idx = store.stories.findIndex(s => s.id === req.params.id);
   if (idx < 0) return res.status(404).json({ ok: false, error: 'Story not found' });
   const story = store.stories[idx];
-  if (!canEditStory(req.user, story))
-    return res.status(403).json({ ok: false, error: 'You cannot delete this story.' });
+  if (!canEditStory(req.user, story)) return res.status(403).json({ ok: false, error: 'You cannot delete this story.' });
   store.stories.splice(idx, 1);
   audit('story.delete', req, { storyId: story.id });
   try { await refreshNews(); } catch {}
   res.json({ ok: true });
 });
 
-// ═══════════════════════════════════════════
-// ADMIN — STORIES
-// ═══════════════════════════════════════════
-
+// ADMIN
 app.get('/api/admin/stories', requireRole('admin', 'editor'), (_req, res) =>
   res.json({ ok: true, stories: store.stories.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)) }));
 
@@ -1234,10 +1321,9 @@ app.post('/api/admin/moderate/:id', requireRole('admin', 'editor'), async (req, 
   const story = store.stories.find(s => s.id === req.params.id);
   if (!story) return res.status(404).json({ ok: false, error: 'Story not found.' });
   const status = req.body?.status;
-  if (!['draft', 'submitted', 'published', 'rejected', 'scheduled'].includes(status))
+  if (!['draft','submitted','published','rejected','scheduled'].includes(status))
     return res.status(400).json({ ok: false, error: 'Invalid status' });
-  story.status = status;
-  story.updatedAt = now();
+  story.status = status; story.updatedAt = now();
   if (status === 'published' && !story.publishedAt) story.publishedAt = now();
   audit('story.moderate', req, { storyId: story.id, status });
   try { await refreshNews(); } catch {}
@@ -1256,13 +1342,7 @@ app.patch('/api/admin/stories/:id', requireRole('admin', 'editor'), async (req, 
   res.json({ ok: true, story });
 });
 
-// ═══════════════════════════════════════════
-// ADMIN — SETTINGS
-// ═══════════════════════════════════════════
-
-app.get('/api/admin/settings', requireRole('admin'), (_req, res) =>
-  res.json({ ok: true, settings: store.settings }));
-
+app.get('/api/admin/settings', requireRole('admin'), (_req, res) => res.json({ ok: true, settings: store.settings }));
 app.patch('/api/admin/settings', requireRole('admin'), (req, res) => {
   const i = req.body || {};
   store.settings = {
@@ -1278,88 +1358,62 @@ app.patch('/api/admin/settings', requireRole('admin'), (req, res) => {
   audit('settings.update', req);
   res.json({ ok: true, settings: store.settings, updatedAt: store.updatedAt });
 });
-
 app.post('/api/admin/admin-password', requireRole('admin'), (req, res) => {
   const current = String(req.body?.currentPassword || '');
   const next = String(req.body?.newPassword || '');
   if (next.length < 6) return res.status(400).json({ ok: false, error: 'New password must be at least 6 characters.' });
-  if (!verifyPassword(current, store.admin.passwordHash))
-    return res.status(401).json({ ok: false, error: 'Current password is incorrect.' });
+  if (!verifyPassword(current, store.admin.passwordHash)) return res.status(401).json({ ok: false, error: 'Current password is incorrect.' });
   store.admin.passwordHash = hashPassword(next);
   audit('admin.password_change', req);
   res.json({ ok: true });
 });
 
-// ═══════════════════════════════════════════
-// ADMIN — WRITERS
-// ═══════════════════════════════════════════
-
 app.get('/api/admin/writers', requireRole('admin'), (_req, res) =>
   res.json({ ok: true, writers: store.writers.map(({ passwordHash, ...w }) => w) }));
-
 app.post('/api/admin/writers', requireRole('admin'), (req, res) => {
   const { username, email, password, name, role = 'writer' } = req.body || {};
-  if (!username || !password || !name)
-    return res.status(400).json({ ok: false, error: 'Name, username and password are required.' });
+  if (!username || !password || !name) return res.status(400).json({ ok: false, error: 'Name, username and password are required.' });
   if (store.writers.some(w => w.username === username || (email && w.email === email)))
     return res.status(409).json({ ok: false, error: 'Writer already exists.' });
   const writer = {
-    id: uid('writer'),
-    username: safeText(username, 80),
-    email: safeText(email, 160),
-    passwordHash: hashPassword(password),
-    name: safeText(name, 120),
+    id: uid('writer'), username: safeText(username, 80), email: safeText(email, 160),
+    passwordHash: hashPassword(password), name: safeText(name, 120),
     role: ['writer', 'editor'].includes(role) ? role : 'writer',
-    status: 'active',
-    createdAt: now(),
-    lastLoginAt: null
+    status: 'active', createdAt: now(), lastLoginAt: null
   };
   store.writers.push(writer);
   audit('writer.create', req, { writerId: writer.id });
   const { passwordHash, ...pub } = writer;
   res.json({ ok: true, writer: pub });
 });
-
 app.patch('/api/admin/writers/:id', requireRole('admin'), (req, res) => {
   const w = store.writers.find(x => x.id === req.params.id);
   if (!w) return res.status(404).json({ ok: false, error: 'Writer not found.' });
-  for (const k of ['username', 'email', 'name', 'status'])
-    if (req.body[k] !== undefined) w[k] = safeText(req.body[k], 160);
-  if (req.body.role !== undefined && ['writer', 'editor'].includes(req.body.role)) w.role = req.body.role;
+  for (const k of ['username','email','name','status']) if (req.body[k] !== undefined) w[k] = safeText(req.body[k], 160);
+  if (req.body.role !== undefined && ['writer','editor'].includes(req.body.role)) w.role = req.body.role;
   if (req.body.password) w.passwordHash = hashPassword(req.body.password);
   audit('writer.update', req, { writerId: w.id });
   const { passwordHash, ...pub } = w;
   res.json({ ok: true, writer: pub });
 });
-
 app.delete('/api/admin/writers/:id', requireRole('admin'), (req, res) => {
   store.writers = store.writers.filter(w => w.id !== req.params.id);
   audit('writer.delete', req, { writerId: req.params.id });
   res.json({ ok: true });
 });
 
-// ═══════════════════════════════════════════
-// ADMIN — SOURCES
-// ═══════════════════════════════════════════
-
 app.get('/api/admin/sources', requireRole('admin'), (_req, res) =>
   res.json({ ok: true, sources: getFeeds(), custom: store.sources.custom, overrides: store.sources.overrides }));
-
 app.post('/api/admin/sources', requireRole('admin'), (req, res) => {
   const { name, url, category = 'Nigeria', region = 'Nigeria' } = req.body || {};
   if (!name || !url) return res.status(400).json({ ok: false, error: 'Name and URL are required.' });
   const cleanName = safeText(name, 120);
   if (store.sources.custom.some(x => x.name === cleanName) || BUILTIN_FEEDS.some(x => x.name === cleanName))
     return res.status(409).json({ ok: false, error: 'A source with that name already exists.' });
-  store.sources.custom.push({
-    name: cleanName, url: safeText(url, 500),
-    category: safeText(category, 60), region: safeText(region, 60),
-    enabled: true, builtin: false
-  });
+  store.sources.custom.push({ name: cleanName, url: safeText(url, 500), category: safeText(category, 60), region: safeText(region, 60), enabled: true, builtin: false });
   audit('source.create', req, { name: cleanName });
   res.json({ ok: true });
 });
-
 app.patch('/api/admin/sources', requireRole('admin'), async (req, res) => {
   const { name, ...patch } = req.body || {};
   if (!name) return res.status(400).json({ ok: false, error: 'Source name required.' });
@@ -1370,7 +1424,6 @@ app.patch('/api/admin/sources', requireRole('admin'), async (req, res) => {
   try { await refreshNews(); } catch {}
   res.json({ ok: true });
 });
-
 app.delete('/api/admin/sources/:name', requireRole('admin'), async (req, res) => {
   const name = decodeURIComponent(req.params.name);
   store.sources.custom = store.sources.custom.filter(x => x.name !== name);
@@ -1380,36 +1433,24 @@ app.delete('/api/admin/sources/:name', requireRole('admin'), async (req, res) =>
   res.json({ ok: true });
 });
 
-// ═══════════════════════════════════════════
-// ADMIN — COMMENTS MODERATION
-// ═══════════════════════════════════════════
-
 app.get('/api/admin/comments', requireRole('admin', 'editor'), async (_req, res) => {
   try {
-    const { data, error } = await supabase.from('comments')
-      .select('*').order('created_at', { ascending: false }).limit(200);
+    const { data, error } = await supabase.from('comments').select('*').order('created_at', { ascending: false }).limit(200);
     if (error) throw new Error(error.message);
     res.json({ ok: true, comments: data || [] });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
 app.patch('/api/admin/comments/:id', requireRole('admin', 'editor'), async (req, res) => {
   try {
     const status = req.body?.status;
-    if (!['approved', 'hidden'].includes(status))
-      return res.status(400).json({ ok: false, error: 'Invalid status' });
+    if (!['approved','hidden'].includes(status)) return res.status(400).json({ ok: false, error: 'Invalid status' });
     const { error } = await supabase.from('comments').update({ status }).eq('id', req.params.id);
     if (error) throw new Error(error.message);
     engagementCache.at = 0;
     audit('comment.' + status, req, { commentId: req.params.id });
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
 app.delete('/api/admin/comments/:id', requireRole('admin', 'editor'), async (req, res) => {
   try {
     const { error } = await supabase.from('comments').delete().eq('id', req.params.id);
@@ -1417,14 +1458,8 @@ app.delete('/api/admin/comments/:id', requireRole('admin', 'editor'), async (req
     engagementCache.at = 0;
     audit('comment.delete', req, { commentId: req.params.id });
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
-// ═══════════════════════════════════════════
-// ADMIN — ARTICLE CACHE
-// ═══════════════════════════════════════════
 
 app.post('/api/admin/clear-article-cache', requireRole('admin'), async (req, res) => {
   try {
@@ -1433,34 +1468,22 @@ app.post('/api/admin/clear-article-cache', requireRole('admin'), async (req, res
     if (olderThanDays > 0) {
       const date = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
       query = query.lt('fetched_at', date);
-    } else {
-      query = query.neq('url_hash', '');
-    }
+    } else query = query.neq('url_hash', '');
     const { error } = await query;
     if (error) throw new Error(error.message);
     audit('article_cache.clear', req, { olderThanDays });
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
-// ═══════════════════════════════════════════
-// ADMIN — REFRESH + AUDIT
-// ═══════════════════════════════════════════
 
 app.post('/api/admin/refresh', requireRole('admin', 'editor'), async (req, res) => {
   try {
     const c = await refreshNews();
     audit('news.refresh', req);
     res.json({ ok: true, updatedAt: new Date(c.updatedAt).toISOString(), count: c.items.length });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
-
-app.get('/api/admin/audit', requireRole('admin'), (_req, res) =>
-  res.json({ ok: true, audit: store.audit }));
+app.get('/api/admin/audit', requireRole('admin'), (_req, res) => res.json({ ok: true, audit: store.audit }));
 
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Not found', path: req.path }));
 
@@ -1471,13 +1494,8 @@ app.use((req, res) => res.status(404).json({ ok: false, error: 'Not found', path
 async function boot() {
   try {
     const loaded = await loadStoreFromSupabase();
-    if (loaded) {
-      store = loaded;
-      console.log('[boot] loaded store from Supabase');
-    } else {
-      console.log('[boot] no store row found — creating fresh one');
-      await saveStoreNow();
-    }
+    if (loaded) { store = loaded; console.log('[boot] loaded store from Supabase'); }
+    else { console.log('[boot] no store row found — creating fresh one'); await saveStoreNow(); }
   } catch (e) {
     console.error('[boot] failed to load store:', e.message);
     store = freshStore();
@@ -1486,7 +1504,7 @@ async function boot() {
   cache = { updatedAt: Date.now(), items: publicStories(), sources: {} };
 
   app.listen(PORT, '0.0.0.0', () =>
-    console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT} [linkedom + article cache + reactions]`)
+    console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT} [linkedom + accounts + reactions]`)
   );
 
   refreshNews().catch(e => console.error('[boot news]', e.message));
@@ -1494,22 +1512,17 @@ async function boot() {
   setInterval(pruneSessions, 10 * 60 * 1000);
   pruneSessions();
 
-  // Daily article cache cleanup
   setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
       const { error } = await supabase.from('articles').delete().lt('fetched_at', cutoff);
       if (error) console.warn('[article cleanup]', error.message);
-      else console.log('[article cleanup] done');
     } catch (e) { console.warn('[article cleanup]', e.message); }
   }, 24 * 60 * 60 * 1000);
 
-  // Memory telemetry
   setInterval(() => {
     const m = process.memoryUsage();
-    const rss = (m.rss / 1048576).toFixed(1);
-    const heap = (m.heapUsed / 1048576).toFixed(1);
-    console.log(`[mem] rss=${rss}MB heap=${heap}MB sessions=${sessions.size} articles=${cache.items.length}`);
+    console.log(`[mem] rss=${(m.rss/1048576).toFixed(1)}MB heap=${(m.heapUsed/1048576).toFixed(1)}MB sessions=${sessions.size}`);
   }, 5 * 60 * 1000);
 }
 
