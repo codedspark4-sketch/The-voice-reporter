@@ -1,0 +1,16 @@
+{
+  "name": "the-voice-reporter-live",
+  "version": "4.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": "20.x" },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "@supabase/supabase-js": "2.45.4",
+    "express": "^4.21.2",
+    "linkedom": "^0.18.5",
+    "multer": "^2.0.2",
+    "rss-parser": "^3.13.0"
+  }
+}

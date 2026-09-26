@@ -3,7 +3,7 @@ const Parser = require('rss-parser');
 const path = require('path');
 const crypto = require('crypto');
 const multer = require('multer');
-const { JSDOM } = require('jsdom');
+const { parseHTML } = require('linkedom');
 const { Readability } = require('@mozilla/readability');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -31,7 +31,6 @@ const parser = new Parser({
 
 app.set('trust proxy', 1);
 
-// ─── CORS ───
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allowed = FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS.includes(origin) : !!origin;
@@ -49,10 +48,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '12mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '512kb' }));
 
-// ─── Feeds ───
 const BUILTIN_FEEDS = [
   ['PUNCH', 'Nigeria', 'Nigeria', 'https://rss.punchng.com/v1/category/latest_news'],
   ['PUNCH Politics', 'Nigeria', 'Politics', 'https://rss.punchng.com/v1/category/politics'],
@@ -72,7 +70,7 @@ const BUILTIN_FEEDS = [
   ['The Guardian World', 'World', 'World', 'https://www.theguardian.com/world/rss'],
   ['New York Times World', 'World', 'World', 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml'],
   ['NPR World', 'World', 'World', 'https://feeds.npr.org/1004/rss.xml'],
-  ['Sky News World', 'World', 'World', 'https://feeds.skynet.com/feeds/rss/world.xml'.replace('skynet', 'skynews')],
+  ['Sky News World', 'World', 'World', 'https://feeds.skynews.com/feeds/rss/world.xml'],
   ['NHK Global', 'World', 'World', 'https://www3.nhk.or.jp/rssxml/news/globalnewsroom.xml'],
   ['CBC World', 'World', 'World', 'https://www.cbc.ca/webfeed/rss/rss-world'],
   ['TechCrunch', 'World', 'Technology', 'https://techcrunch.com/feed/'],
@@ -122,7 +120,6 @@ const DEFAULT_SETTINGS = {
   fallbacks: { ...REMOTE_FALLBACKS }
 };
 
-// ─── Utils ───
 function clone(v) { return JSON.parse(JSON.stringify(v)); }
 function now() { return new Date().toISOString(); }
 function uid(p = 'id') { return `${p}_${crypto.randomUUID().replace(/-/g, '')}`; }
@@ -147,7 +144,6 @@ function decodeHtml(input = '') {
 }
 function normalizeTitle(v = '') { return String(v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 
-// ─── Store ───
 function freshStore() {
   return {
     version: 4,
@@ -176,10 +172,10 @@ function normalizeStore(s) {
       fallbacks: { ...base.settings.fallbacks, ...(incoming.settings?.fallbacks || {}) }
     },
     sources: { custom: incoming.sources?.custom || [], overrides: incoming.sources?.overrides || {} },
-    stories: Array.isArray(incoming.stories) ? incoming.stories : [],
+    stories: Array.isArray(incoming.stories) ? incoming.stories.slice(0, 400) : [],
     writers: Array.isArray(incoming.writers) ? incoming.writers : [],
     admin: { ...base.admin, ...(incoming.admin || {}) },
-    audit: Array.isArray(incoming.audit) ? incoming.audit : []
+    audit: Array.isArray(incoming.audit) ? incoming.audit.slice(0, 80) : []
   };
 }
 
@@ -196,6 +192,8 @@ async function loadStoreFromSupabase() {
 
 async function saveStoreNow() {
   store.updatedAt = now();
+  if (store.stories.length > 400) store.stories.length = 400;
+  if (store.audit.length > 80) store.audit.length = 80;
   const payload = { id: 'main', data: store, updated_at: now() };
   const { error } = await supabase.from('store').upsert(payload, { onConflict: 'id' });
   if (error) throw new Error(error.message);
@@ -209,22 +207,30 @@ function saveStore() {
     saveInFlight = saveStoreNow()
       .catch(e => console.error('[store save]', e.message))
       .finally(() => { saveInFlight = null; });
-  }, 600);
+  }, 800);
 }
 
 // ─── Sessions ───
 const sessions = new Map();
+function issueSession(user) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { ...user, expires: Date.now() + 1000 * 60 * 60 * 12 });
+  return token;
+}
+function pruneSessions() {
+  const t = Date.now();
+  let removed = 0;
+  for (const [token, s] of sessions) {
+    if (s.expires < t) { sessions.delete(token); removed++; }
+  }
+  if (removed) console.log(`[sessions] cleaned ${removed}`);
+}
 function readCookie(req, name) {
   for (const part of String(req.headers.cookie || '').split(';')) {
     const [k, ...rest] = part.trim().split('=');
     if (k === name) return decodeURIComponent(rest.join('='));
   }
   return '';
-}
-function issueSession(user) {
-  const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { ...user, expires: Date.now() + 1000 * 60 * 60 * 12 });
-  return token;
 }
 function auth(req) {
   const token = readCookie(req, 'tvr_session');
@@ -260,11 +266,10 @@ function audit(action, req, meta = {}) {
     ip: req?.ip || '',
     meta
   });
-  store.audit = store.audit.slice(0, 300);
+  if (store.audit.length > 80) store.audit.length = 80;
   saveStore();
 }
 
-// ─── Feed helpers ───
 function categoryFallback(category) {
   const key = Object.keys(store.settings.fallbacks || {}).find(k => k.toLowerCase() === String(category || 'News').toLowerCase()) || 'News';
   return store.settings.fallbacks?.[key] || REMOTE_FALLBACKS.News;
@@ -358,28 +363,41 @@ function publicStories() {
     tags: s.tags || [], slug: s.slug
   }));
 }
+
 let cache = { updatedAt: 0, items: [], sources: {} };
+let refreshing = false;
+
 async function refreshNews() {
-  const feeds = getFeeds();
-  const batches = await Promise.all(feeds.map(fetchFeed));
-  const sources = {};
-  let rss = [];
-  batches.forEach((b, i) => {
-    const f = feeds[i];
-    sources[f.name] = { ok: b.ok, count: b.count, error: b.error, url: f.url, category: f.category, region: f.region, builtin: !!f.builtin };
-    rss = rss.concat(b.items);
-  });
-  const combined = rss.concat(publicStories());
-  combined.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
-  const seen = new Set();
-  const items = combined.filter(item => {
-    const k = normalizeTitle(item.title);
-    if (!k || seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  }).slice(0, 500);
-  cache = { updatedAt: Date.now(), items, sources };
-  return cache;
+  if (refreshing) {
+    console.log('[refresh] skipped — already running');
+    return cache;
+  }
+  refreshing = true;
+  try {
+    const feeds = getFeeds();
+    const batches = await Promise.all(feeds.map(fetchFeed));
+    const sources = {};
+    let rss = [];
+    batches.forEach((b, i) => {
+      const f = feeds[i];
+      sources[f.name] = { ok: b.ok, count: b.count, error: b.error, url: f.url, category: f.category, region: f.region, builtin: !!f.builtin };
+      rss = rss.concat(b.items);
+    });
+    const combined = rss.concat(publicStories());
+    combined.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const seen = new Set();
+    const items = combined.filter(item => {
+      const k = normalizeTitle(item.title);
+      if (!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    }).slice(0, 200);
+    cache = { updatedAt: Date.now(), items, sources };
+    rss = null;
+    return cache;
+  } finally {
+    refreshing = false;
+  }
 }
 
 function sanitizeStoryInput(body) {
@@ -388,7 +406,7 @@ function sanitizeStoryInput(body) {
     id: body.id || uid('story'),
     title,
     subheadline: safeText(body.subheadline, 600),
-    body: safeText(body.body, 150000),
+    body: safeText(body.body, 80000),
     category: safeText(body.category || 'Nigeria', 60),
     region: safeText(body.region || 'Nigeria', 60),
     tags: Array.isArray(body.tags)
@@ -417,7 +435,7 @@ function canEditStory(user, story) {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (/^(image|video)\//i.test(file.mimetype || '')) return cb(null, true);
     cb(new Error('Only image and video files are allowed.'));
@@ -440,8 +458,7 @@ async function proxyJson(endpoint, payload) {
 
 function newsCardItem(item) {
   return {
-    id: item.id,
-    title: item.title,
+    id: item.id, title: item.title,
     subheadline: item.subheadline || '',
     description: item.description || '',
     link: item.link || '',
@@ -451,17 +468,14 @@ function newsCardItem(item) {
     video: item.video || '',
     source: item.source || 'THE VOICE REPORTER',
     sourceAttribution: item.sourceAttribution || '',
-    author: item.author || '',
-    region: item.region || '',
+    author: item.author || '', region: item.region || '',
     category: item.category || 'News',
     publishedAt: item.publishedAt || item.updatedAt || now(),
     updatedAt: item.updatedAt || '',
     editorial: !!item.editorial,
     status: item.status || 'published',
-    isBreaking: !!item.isBreaking,
-    isDeveloping: !!item.isDeveloping,
-    isUpdated: !!item.isUpdated,
-    featured: !!item.featured,
+    isBreaking: !!item.isBreaking, isDeveloping: !!item.isDeveloping,
+    isUpdated: !!item.isUpdated, featured: !!item.featured,
     slug: item.slug || ''
   };
 }
@@ -511,6 +525,13 @@ app.get('/api/health', async (_req, res) => {
     supabaseOk = true;
   } catch (e) { supabaseError = e.message; }
 
+  let articleCacheSize = null;
+  try {
+    const { count } = await supabase.from('articles').select('*', { count: 'exact', head: true });
+    articleCacheSize = count || 0;
+  } catch {}
+
+  const mem = process.memoryUsage();
   res.json({
     ok: true,
     service: 'THE VOICE REPORTER',
@@ -521,14 +542,89 @@ app.get('/api/health', async (_req, res) => {
     feedStories: cache.items.length,
     publishedStories: store.stories.filter(s => s.status === 'published').length,
     writers: store.writers.length,
+    sessions: sessions.size,
+    articleCache: articleCacheSize,
     proxy: { url: PROXY_URL, reachable: proxyReachable },
     supabase: { ok: supabaseOk, error: supabaseError, bucket: SUPABASE_BUCKET },
     cors: { allowedOrigins: FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS : ['(any)'] },
-    storage: 'supabase'
+    storage: 'supabase',
+    parser: 'linkedom',
+    memory: {
+      rssMb: +(mem.rss / 1048576).toFixed(1),
+      heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1),
+      heapTotalMb: +(mem.heapTotal / 1048576).toFixed(1),
+      externalMb: +(mem.external / 1048576).toFixed(1)
+    }
   });
 });
 
-// ─── External article reader (SSRF-guarded) ───
+// ═══════════════════════════════════════════
+// ARTICLE CACHE — Supabase
+// ═══════════════════════════════════════════
+
+function normalizeArticleUrl(url) {
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    ['utm_source','utm_medium','utm_campaign','utm_content','utm_term','fbclid','gclid','ref','mc_cid','mc_eid','_ga','_gl']
+      .forEach(k => u.searchParams.delete(k));
+    let s = u.toString();
+    s = s.replace(/\/$/, '');
+    return s;
+  } catch { return String(url).trim(); }
+}
+
+function articleHash(url) {
+  return crypto.createHash('sha256').update(normalizeArticleUrl(url)).digest('hex');
+}
+
+function articleToResponse(a) {
+  return {
+    title: a.title || '',
+    byline: a.byline || '',
+    excerpt: a.excerpt || '',
+    content: a.content || '',
+    siteName: a.site_name || '',
+    publishedTime: a.published_time || '',
+    url: a.url || ''
+  };
+}
+
+async function getCachedArticle(url) {
+  try {
+    const hash = articleHash(url);
+    const { data, error } = await supabase.from('articles')
+      .select('*').eq('url_hash', hash).maybeSingle();
+    if (error || !data) return null;
+    const age = Date.now() - new Date(data.fetched_at).getTime();
+    const stale = age > 7 * 24 * 60 * 60 * 1000;
+    return { ...data, stale };
+  } catch { return null; }
+}
+
+async function putCachedArticle(url, article) {
+  try {
+    const content = String(article.content || '');
+    if (content.length > 250000) return;
+    const hash = articleHash(url);
+    await supabase.from('articles').upsert({
+      url_hash: hash,
+      url: normalizeArticleUrl(url),
+      title: String(article.title || '').slice(0, 500),
+      byline: String(article.byline || '').slice(0, 200),
+      excerpt: String(article.excerpt || '').slice(0, 1000),
+      content: content,
+      site_name: String(article.siteName || '').slice(0, 200),
+      published_time: String(article.publishedTime || '').slice(0, 100),
+      fetched_at: new Date().toISOString()
+    }, { onConflict: 'url_hash' });
+  } catch (e) { console.warn('[article cache write]', e.message); }
+}
+
+// ═══════════════════════════════════════════
+// EXTERNAL ARTICLE READER
+// ═══════════════════════════════════════════
+
 function isPrivateHost(hostname) {
   const h = String(hostname || '').toLowerCase();
   if (!h) return true;
@@ -547,6 +643,30 @@ function isPrivateHost(hostname) {
   return false;
 }
 
+let parsing = false;
+const parseQueue = [];
+async function withParseLock(fn) {
+  return new Promise((resolve, reject) => {
+    parseQueue.push({ fn, resolve, reject });
+    if (parseQueue.length > 20) {
+      const dropped = parseQueue.shift();
+      dropped.reject(new Error('Too many articles queued. Try again in a moment.'));
+    }
+    processQueue();
+  });
+}
+async function processQueue() {
+  if (parsing || !parseQueue.length) return;
+  parsing = true;
+  const { fn, resolve, reject } = parseQueue.shift();
+  try { resolve(await fn()); }
+  catch (e) { reject(e); }
+  finally {
+    parsing = false;
+    setImmediate(processQueue);
+  }
+}
+
 async function fetchExternalArticle(url) {
   const u = new URL(url);
   if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Invalid article URL');
@@ -558,10 +678,18 @@ async function fetchExternalArticle(url) {
   });
   if (!r.ok) throw new Error(`Publisher returned ${r.status}`);
   const html = await r.text();
-  const dom = new JSDOM(html, { url: r.url });
-  const article = new Readability(dom.window.document).parse();
-  if (!article || !article.textContent || article.textContent.trim().length < 80) throw new Error('Could not extract a readable article');
-  return {
+
+  const { document } = parseHTML(html);
+  try {
+    document.baseURI = r.url;
+    document.documentURI = r.url;
+  } catch (_) {}
+
+  const article = new Readability(document).parse();
+  if (!article || !article.textContent || article.textContent.trim().length < 80) {
+    throw new Error('Could not extract a readable article');
+  }
+  const out = {
     title: article.title || '',
     byline: article.byline || '',
     excerpt: article.excerpt || '',
@@ -570,13 +698,30 @@ async function fetchExternalArticle(url) {
     publishedTime: article.publishedTime || '',
     url: r.url
   };
+  try { document.defaultView = null; } catch (_) {}
+  return out;
 }
 
 app.get('/api/article', async (req, res) => {
   const url = safeText(req.query.url, 4000);
   if (!url) return res.status(400).json({ ok: false, error: 'Article URL is required.' });
-  try { res.json({ ok: true, article: await fetchExternalArticle(url) }); }
-  catch (e) { res.status(502).json({ ok: false, error: e.message }); }
+
+  const cached = await getCachedArticle(url);
+
+  if (cached && !cached.stale) {
+    return res.json({ ok: true, article: articleToResponse(cached), cached: true });
+  }
+
+  try {
+    const article = await withParseLock(() => fetchExternalArticle(url));
+    putCachedArticle(url, article).catch(() => {});
+    res.json({ ok: true, article, cached: false });
+  } catch (e) {
+    if (cached) {
+      return res.json({ ok: true, article: articleToResponse(cached), cached: true, stale: true });
+    }
+    res.status(502).json({ ok: false, error: e.message });
+  }
 });
 
 app.get('/api/story/:id', (req, res) => {
@@ -591,7 +736,6 @@ app.get('/api/story/:id', (req, res) => {
 
 let engagementCache = { at: 0, likes: {}, comments: {} };
 
-// Summary of all counts (used by home page)
 app.get('/api/engagement-summary', async (_req, res) => {
   try {
     if (Date.now() - engagementCache.at < 30000) {
@@ -612,40 +756,95 @@ app.get('/api/engagement-summary', async (_req, res) => {
   }
 });
 
-// Per-story detail (used by article page)
 app.get('/api/engagement/:storyId', async (req, res) => {
   try {
     const storyId = safeText(decodeURIComponent(req.params.storyId), 500);
     const visitorId = safeText(req.query.visitor || '', 80);
+    const sort = req.query.sort === 'new' ? 'new' : 'top';
     if (!storyId) return res.status(400).json({ ok: false, error: 'Story ID required' });
 
-    const [likeCountRes, likedRes, commentsRes] = await Promise.all([
+    const [likeCountRes, likedRes, commentRowsRes] = await Promise.all([
       supabase.from('likes').select('*', { count: 'exact', head: true }).eq('story_id', storyId),
       visitorId
         ? supabase.from('likes').select('id').eq('story_id', storyId).eq('visitor_id', visitorId).maybeSingle()
         : Promise.resolve({ data: null }),
-      supabase.from('comments').select('id, name, body, created_at')
+      supabase.from('comments')
+        .select('id, name, body, visitor_id, parent_id, reply_to_name, created_at')
         .eq('story_id', storyId).eq('status', 'approved')
-        .order('created_at', { ascending: false }).limit(80)
+        .order('created_at', { ascending: true })
+        .limit(300)
     ]);
+
+    const rows = commentRowsRes.data || [];
+    const commentIds = rows.map(c => c.id);
+
+    let allLikes = [];
+    if (commentIds.length) {
+      const { data } = await supabase.from('comment_likes')
+        .select('comment_id, visitor_id')
+        .in('comment_id', commentIds);
+      allLikes = data || [];
+    }
+
+    const likeCounts = {};
+    const likedSet = new Set();
+    for (const l of allLikes) {
+      likeCounts[l.comment_id] = (likeCounts[l.comment_id] || 0) + 1;
+      if (visitorId && l.visitor_id === visitorId) likedSet.add(l.comment_id);
+    }
+
+    const byId = {};
+    const topLevel = [];
+    for (const c of rows) {
+      byId[c.id] = {
+        id: c.id,
+        name: c.name || 'Anonymous',
+        body: c.body,
+        at: c.created_at,
+        replyToName: c.reply_to_name || null,
+        likes: likeCounts[c.id] || 0,
+        liked: likedSet.has(c.id),
+        isMine: visitorId ? c.visitor_id === visitorId : false,
+        parentId: c.parent_id || null,
+        replies: []
+      };
+    }
+    for (const c of rows) {
+      if (c.parent_id && byId[c.parent_id]) {
+        byId[c.parent_id].replies.push(byId[c.id]);
+      } else {
+        topLevel.push(byId[c.id]);
+      }
+    }
+
+    if (sort === 'top') {
+      topLevel.sort((a, b) => {
+        const lb = b.likes - a.likes;
+        if (lb !== 0) return lb;
+        const rb = b.replies.length - a.replies.length;
+        if (rb !== 0) return rb;
+        return new Date(b.at) - new Date(a.at);
+      });
+    } else {
+      topLevel.sort((a, b) => new Date(b.at) - new Date(a.at));
+    }
+
+    for (const t of topLevel) {
+      t.replies.sort((a, b) => new Date(a.at) - new Date(b.at));
+    }
 
     res.json({
       ok: true,
       likes: likeCountRes.count || 0,
       liked: !!likedRes.data,
-      comments: (commentsRes.data || []).map(c => ({
-        id: c.id,
-        name: c.name,
-        body: c.body,
-        at: c.created_at
-      }))
+      comments: topLevel,
+      total: rows.length
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// Toggle like
 app.post('/api/like', async (req, res) => {
   try {
     const storyId = safeText(req.body?.storyId, 500);
@@ -672,43 +871,93 @@ app.post('/api/like', async (req, res) => {
   }
 });
 
-// Post comment
+app.post('/api/comment-like', async (req, res) => {
+  try {
+    const commentId = safeText(req.body?.commentId, 100);
+    const visitorId = safeText(req.body?.visitorId, 80);
+    if (!commentId || !visitorId)
+      return res.status(400).json({ ok: false, error: 'Missing comment or visitor' });
+
+    const { data: existing } = await supabase.from('comment_likes')
+      .select('id').eq('comment_id', commentId).eq('visitor_id', visitorId).maybeSingle();
+
+    if (existing) {
+      await supabase.from('comment_likes').delete().eq('id', existing.id);
+    } else {
+      const { error } = await supabase.from('comment_likes')
+        .insert({ comment_id: commentId, visitor_id: visitorId });
+      if (error) throw new Error(error.message);
+    }
+
+    const { count } = await supabase.from('comment_likes')
+      .select('*', { count: 'exact', head: true }).eq('comment_id', commentId);
+
+    res.json({ ok: true, liked: !existing, likes: count || 0 });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post('/api/comment', async (req, res) => {
   try {
     const storyId = safeText(req.body?.storyId, 500);
     const name = safeText(req.body?.name || 'Anonymous', 60) || 'Anonymous';
     const body = safeText(req.body?.body, 2000);
     const visitorId = safeText(req.body?.visitorId, 80);
+    const parentId = safeText(req.body?.parentId, 100) || null;
+    const replyToName = safeText(req.body?.replyToName, 60) || null;
 
     if (!storyId || !body) return res.status(400).json({ ok: false, error: 'Story and comment are required' });
     if (body.length < 2) return res.status(400).json({ ok: false, error: 'Comment is too short' });
     if (body.length > 2000) return res.status(400).json({ ok: false, error: 'Comment is too long (2000 characters max)' });
 
-    // Rate limit: max 5 comments per visitor per hour
     if (visitorId) {
       const oneHourAgo = new Date(Date.now() - 3600 * 1000).toISOString();
       const { count } = await supabase.from('comments')
         .select('*', { count: 'exact', head: true })
         .eq('visitor_id', visitorId).gte('created_at', oneHourAgo);
-      if ((count || 0) >= 5)
+      if ((count || 0) >= 10)
         return res.status(429).json({ ok: false, error: 'You are commenting too fast. Try again in a bit.' });
     }
 
-    const { data, error } = await supabase.from('comments').insert({
-      story_id: storyId,
-      name,
-      body,
-      visitor_id: visitorId,
-      status: 'approved'
-    }).select().single();
+    const insert = { story_id: storyId, name, body, visitor_id: visitorId, status: 'approved' };
+    if (parentId) insert.parent_id = parentId;
+    if (replyToName) insert.reply_to_name = replyToName;
 
+    const { data, error } = await supabase.from('comments').insert(insert).select().single();
     if (error) throw new Error(error.message);
+
     engagementCache.at = 0;
 
     res.json({
       ok: true,
-      comment: { id: data.id, name: data.name, body: data.body, at: data.created_at }
+      comment: {
+        id: data.id,
+        name: data.name,
+        body: data.body,
+        at: data.created_at,
+        parentId: data.parent_id || null,
+        replyToName: data.reply_to_name || null,
+        likes: 0, liked: false, isMine: true, replies: []
+      }
     });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/comment/:id', async (req, res) => {
+  try {
+    const visitorId = safeText(req.query.visitor, 80);
+    const { data: c } = await supabase.from('comments')
+      .select('visitor_id').eq('id', req.params.id).maybeSingle();
+    if (!c) return res.status(404).json({ ok: false, error: 'Comment not found' });
+    if (!visitorId || c.visitor_id !== visitorId)
+      return res.status(403).json({ ok: false, error: 'You can only delete your own comments' });
+
+    await supabase.from('comments').delete().eq('id', req.params.id);
+    engagementCache.at = 0;
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -765,10 +1014,8 @@ app.post('/api/auth/logout', (req, res) => {
 app.post('/api/ai/:mode', async (req, res) => {
   const mode = req.params.mode === 'ask' ? 'chat' : req.params.mode;
   const allowed = {
-    chat: store.settings.ai.chat,
-    think: store.settings.ai.think,
-    expert: store.settings.ai.expert,
-    vision: store.settings.ai.vision
+    chat: store.settings.ai.chat, think: store.settings.ai.think,
+    expert: store.settings.ai.expert, vision: store.settings.ai.vision
   };
   if (!store.settings.ai.enabled || allowed[mode] === false)
     return res.status(403).json({ ok: false, error: 'This AI feature is disabled.' });
@@ -794,7 +1041,11 @@ app.post('/api/ai/fetch-url', async (req, res) => {
 
 app.post('/api/upload', requireRole('admin', 'editor', 'writer'), (req, res) => {
   upload.single('file')(req, res, async err => {
-    if (err) return res.status(400).json({ ok: false, error: err.message });
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE')
+        return res.status(400).json({ ok: false, error: 'File too large. Max 5 MB.' });
+      return res.status(400).json({ ok: false, error: err.message });
+    }
     if (!req.file) return res.status(400).json({ ok: false, error: 'No file selected.' });
     try {
       const ext = path.extname(req.file.originalname || '').toLowerCase().replace(/[^.a-z0-9]/g, '') || '';
@@ -805,6 +1056,7 @@ app.post('/api/upload', requireRole('admin', 'editor', 'writer'), (req, res) => 
       if (upErr) throw new Error(upErr.message);
       const { data: { publicUrl } } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(filename);
       audit('media.upload', req, { file: filename, type: req.file.mimetype, size: req.file.size });
+      req.file.buffer = null;
       res.json({ ok: true, url: publicUrl, type: req.file.mimetype, size: req.file.size, name: req.file.originalname });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
@@ -835,6 +1087,7 @@ app.post('/api/writer/stories', requireRole('admin', 'editor', 'writer'), async 
   if (req.user.role === 'writer' && store.settings.publishing.writersNeedApproval && ['published', 'scheduled'].includes(story.status))
     story.status = 'submitted';
   store.stories.unshift(story);
+  if (store.stories.length > 400) store.stories.length = 400;
   audit('story.create', req, { storyId: story.id });
   try { await refreshNews(); } catch {}
   res.json({ ok: true, story });
@@ -847,11 +1100,8 @@ app.patch('/api/writer/stories/:id', requireRole('admin', 'editor', 'writer'), a
     return res.status(403).json({ ok: false, error: 'You cannot edit this story.' });
   const old = story.status;
   Object.assign(story, sanitizeStoryInput({ ...story, ...req.body }), {
-    id: story.id,
-    authorId: story.authorId,
-    createdAt: story.createdAt,
-    updatedAt: now(),
-    publishedAt: story.publishedAt
+    id: story.id, authorId: story.authorId, createdAt: story.createdAt,
+    updatedAt: now(), publishedAt: story.publishedAt
   });
   if (story.status === 'published' && old !== 'published') story.publishedAt = now();
   if (req.user.role === 'writer' && store.settings.publishing.writersNeedApproval && old === 'published' && !store.settings.publishing.allowWriterEditPublished)
@@ -1018,12 +1268,9 @@ app.post('/api/admin/sources', requireRole('admin'), (req, res) => {
   if (store.sources.custom.some(x => x.name === cleanName) || BUILTIN_FEEDS.some(x => x.name === cleanName))
     return res.status(409).json({ ok: false, error: 'A source with that name already exists.' });
   store.sources.custom.push({
-    name: cleanName,
-    url: safeText(url, 500),
-    category: safeText(category, 60),
-    region: safeText(region, 60),
-    enabled: true,
-    builtin: false
+    name: cleanName, url: safeText(url, 500),
+    category: safeText(category, 60), region: safeText(region, 60),
+    enabled: true, builtin: false
   });
   audit('source.create', req, { name: cleanName });
   res.json({ ok: true });
@@ -1092,6 +1339,29 @@ app.delete('/api/admin/comments/:id', requireRole('admin', 'editor'), async (req
 });
 
 // ═══════════════════════════════════════════
+// ADMIN — ARTICLE CACHE
+// ═══════════════════════════════════════════
+
+app.post('/api/admin/clear-article-cache', requireRole('admin'), async (req, res) => {
+  try {
+    const olderThanDays = Number(req.body?.olderThanDays || 0);
+    let query = supabase.from('articles').delete();
+    if (olderThanDays > 0) {
+      const date = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+      query = query.lt('fetched_at', date);
+    } else {
+      query = query.neq('url_hash', '');
+    }
+    const { error } = await query;
+    if (error) throw new Error(error.message);
+    audit('article_cache.clear', req, { olderThanDays });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════
 // ADMIN — REFRESH + AUDIT
 // ═══════════════════════════════════════════
 
@@ -1108,7 +1378,6 @@ app.post('/api/admin/refresh', requireRole('admin', 'editor'), async (req, res) 
 app.get('/api/admin/audit', requireRole('admin'), (_req, res) =>
   res.json({ ok: true, audit: store.audit }));
 
-// ─── 404 fallback ───
 app.use((req, res) => res.status(404).json({ ok: false, error: 'Not found', path: req.path }));
 
 // ═══════════════════════════════════════════
@@ -1133,10 +1402,31 @@ async function boot() {
   cache = { updatedAt: Date.now(), items: publicStories(), sources: {} };
 
   app.listen(PORT, '0.0.0.0', () =>
-    console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT}`)
+    console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT} [linkedom + article cache]`)
   );
 
   refreshNews().catch(e => console.error('[boot news]', e.message));
-  setInterval(() => refreshNews().catch(e => console.error('[refresh]', e.message)), 60 * 1000);
+  setInterval(() => refreshNews().catch(e => console.error('[refresh]', e.message)), 90 * 1000);
+  setInterval(pruneSessions, 10 * 60 * 1000);
+  pruneSessions();
+
+  // Daily article cache cleanup
+  setInterval(async () => {
+    try {
+      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const { error } = await supabase.from('articles').delete().lt('fetched_at', cutoff);
+      if (error) console.warn('[article cleanup]', error.message);
+      else console.log('[article cleanup] done');
+    } catch (e) { console.warn('[article cleanup]', e.message); }
+  }, 24 * 60 * 60 * 1000);
+
+  // Memory telemetry
+  setInterval(() => {
+    const m = process.memoryUsage();
+    const rss = (m.rss / 1048576).toFixed(1);
+    const heap = (m.heapUsed / 1048576).toFixed(1);
+    console.log(`[mem] rss=${rss}MB heap=${heap}MB sessions=${sessions.size} articles=${cache.items.length}`);
+  }, 5 * 60 * 1000);
 }
+
 boot().catch(e => { console.error(e); process.exit(1); });
