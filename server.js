@@ -31,6 +31,7 @@ const parser = new Parser({
 
 app.set('trust proxy', 1);
 
+// ─── CORS ───
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   const allowed = FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS.includes(origin) : !!origin;
@@ -51,6 +52,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '512kb' }));
 
+// ─── Feeds ───
 const BUILTIN_FEEDS = [
   ['PUNCH', 'Nigeria', 'Nigeria', 'https://rss.punchng.com/v1/category/latest_news'],
   ['PUNCH Politics', 'Nigeria', 'Politics', 'https://rss.punchng.com/v1/category/politics'],
@@ -91,6 +93,8 @@ const REMOTE_FALLBACKS = {
   Science: 'https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1600&q=82',
   News: 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?auto=format&fit=crop&w=1600&q=82'
 };
+
+const ALLOWED_EMOJIS = ['🔥','❤️','😮','😢','👏'];
 
 const DEFAULT_SETTINGS = {
   site: {
@@ -144,6 +148,7 @@ function decodeHtml(input = '') {
 }
 function normalizeTitle(v = '') { return String(v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 
+// ─── Store ───
 function freshStore() {
   return {
     version: 4,
@@ -270,6 +275,7 @@ function audit(action, req, meta = {}) {
   saveStore();
 }
 
+// ─── Feed helpers ───
 function categoryFallback(category) {
   const key = Object.keys(store.settings.fallbacks || {}).find(k => k.toLowerCase() === String(category || 'News').toLowerCase()) || 'News';
   return store.settings.fallbacks?.[key] || REMOTE_FALLBACKS.News;
@@ -549,6 +555,7 @@ app.get('/api/health', async (_req, res) => {
     cors: { allowedOrigins: FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS : ['(any)'] },
     storage: 'supabase',
     parser: 'linkedom',
+    emojis: ALLOWED_EMOJIS,
     memory: {
       rssMb: +(mem.rss / 1048576).toFixed(1),
       heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1),
@@ -731,26 +738,38 @@ app.get('/api/story/:id', (req, res) => {
 });
 
 // ═══════════════════════════════════════════
-// ENGAGEMENT (likes + comments)
+// ENGAGEMENT (likes + reactions + comments)
 // ═══════════════════════════════════════════
 
-let engagementCache = { at: 0, likes: {}, comments: {} };
+let engagementCache = { at: 0, likes: {}, comments: {}, reactions: {} };
 
 app.get('/api/engagement-summary', async (_req, res) => {
   try {
     if (Date.now() - engagementCache.at < 30000) {
-      return res.json({ ok: true, likes: engagementCache.likes, comments: engagementCache.comments });
+      return res.json({
+        ok: true,
+        likes: engagementCache.likes || {},
+        comments: engagementCache.comments || {},
+        reactions: engagementCache.reactions || {}
+      });
     }
-    const [{ data: likeRows }, { data: commentRows }] = await Promise.all([
+    const [
+      { data: likeRows },
+      { data: commentRows },
+      { data: reactionRows }
+    ] = await Promise.all([
       supabase.from('likes').select('story_id'),
-      supabase.from('comments').select('story_id').eq('status', 'approved')
+      supabase.from('comments').select('story_id').eq('status', 'approved'),
+      supabase.from('reactions').select('story_id')
     ]);
     const likes = {};
     const comments = {};
+    const reactions = {};
     for (const r of likeRows || []) likes[r.story_id] = (likes[r.story_id] || 0) + 1;
     for (const r of commentRows || []) comments[r.story_id] = (comments[r.story_id] || 0) + 1;
-    engagementCache = { at: Date.now(), likes, comments };
-    res.json({ ok: true, likes, comments });
+    for (const r of reactionRows || []) reactions[r.story_id] = (reactions[r.story_id] || 0) + 1;
+    engagementCache = { at: Date.now(), likes, comments, reactions };
+    res.json({ ok: true, likes, comments, reactions });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -763,7 +782,7 @@ app.get('/api/engagement/:storyId', async (req, res) => {
     const sort = req.query.sort === 'new' ? 'new' : 'top';
     if (!storyId) return res.status(400).json({ ok: false, error: 'Story ID required' });
 
-    const [likeCountRes, likedRes, commentRowsRes] = await Promise.all([
+    const [likeCountRes, likedRes, commentRowsRes, reactionsRes] = await Promise.all([
       supabase.from('likes').select('*', { count: 'exact', head: true }).eq('story_id', storyId),
       visitorId
         ? supabase.from('likes').select('id').eq('story_id', storyId).eq('visitor_id', visitorId).maybeSingle()
@@ -772,9 +791,19 @@ app.get('/api/engagement/:storyId', async (req, res) => {
         .select('id, name, body, visitor_id, parent_id, reply_to_name, created_at')
         .eq('story_id', storyId).eq('status', 'approved')
         .order('created_at', { ascending: true })
-        .limit(300)
+        .limit(300),
+      supabase.from('reactions').select('emoji, visitor_id').eq('story_id', storyId)
     ]);
 
+    // ─── Reactions aggregation ───
+    const reactionCounts = {};
+    let myReaction = null;
+    for (const r of reactionsRes.data || []) {
+      reactionCounts[r.emoji] = (reactionCounts[r.emoji] || 0) + 1;
+      if (visitorId && r.visitor_id === visitorId) myReaction = r.emoji;
+    }
+
+    // ─── Comments aggregation ───
     const rows = commentRowsRes.data || [];
     const commentIds = rows.map(c => c.id);
 
@@ -838,13 +867,18 @@ app.get('/api/engagement/:storyId', async (req, res) => {
       likes: likeCountRes.count || 0,
       liked: !!likedRes.data,
       comments: topLevel,
-      total: rows.length
+      total: rows.length,
+      reactions: reactionCounts,
+      myReaction,
+      reactionTotal: (reactionsRes.data || []).length,
+      emojis: ALLOWED_EMOJIS
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
+// ─── Story like ───
 app.post('/api/like', async (req, res) => {
   try {
     const storyId = safeText(req.body?.storyId, 500);
@@ -871,6 +905,54 @@ app.post('/api/like', async (req, res) => {
   }
 });
 
+// ─── Reaction (multi-emoji) ───
+app.post('/api/react', async (req, res) => {
+  try {
+    const storyId = safeText(req.body?.storyId, 500);
+    const visitorId = safeText(req.body?.visitorId, 80);
+    const emoji = safeText(req.body?.emoji, 8);
+
+    if (!storyId || !visitorId) return res.status(400).json({ ok: false, error: 'Missing story or visitor' });
+    if (!ALLOWED_EMOJIS.includes(emoji)) return res.status(400).json({ ok: false, error: 'Invalid emoji' });
+
+    const { data: existing } = await supabase.from('reactions')
+      .select('id, emoji').eq('story_id', storyId).eq('visitor_id', visitorId).maybeSingle();
+
+    let action = 'created';
+    if (existing && existing.emoji === emoji) {
+      await supabase.from('reactions').delete().eq('id', existing.id);
+      action = 'removed';
+    } else if (existing) {
+      const { error } = await supabase.from('reactions').update({ emoji }).eq('id', existing.id);
+      if (error) throw new Error(error.message);
+      action = 'changed';
+    } else {
+      const { error } = await supabase.from('reactions')
+        .insert({ story_id: storyId, visitor_id: visitorId, emoji });
+      if (error) throw new Error(error.message);
+    }
+
+    engagementCache.at = 0;
+
+    const { data: rows } = await supabase.from('reactions')
+      .select('emoji, visitor_id').eq('story_id', storyId);
+
+    const counts = {};
+    let mine = null;
+    let total = 0;
+    for (const r of rows || []) {
+      counts[r.emoji] = (counts[r.emoji] || 0) + 1;
+      total += 1;
+      if (r.visitor_id === visitorId) mine = r.emoji;
+    }
+
+    res.json({ ok: true, action, reactions: counts, mine, total, emojis: ALLOWED_EMOJIS });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Comment like ───
 app.post('/api/comment-like', async (req, res) => {
   try {
     const commentId = safeText(req.body?.commentId, 100);
@@ -898,6 +980,7 @@ app.post('/api/comment-like', async (req, res) => {
   }
 });
 
+// ─── Comment + reply ───
 app.post('/api/comment', async (req, res) => {
   try {
     const storyId = safeText(req.body?.storyId, 500);
@@ -946,6 +1029,7 @@ app.post('/api/comment', async (req, res) => {
   }
 });
 
+// ─── Delete own comment ───
 app.delete('/api/comment/:id', async (req, res) => {
   try {
     const visitorId = safeText(req.query.visitor, 80);
@@ -1402,7 +1486,7 @@ async function boot() {
   cache = { updatedAt: Date.now(), items: publicStories(), sources: {} };
 
   app.listen(PORT, '0.0.0.0', () =>
-    console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT} [linkedom + article cache]`)
+    console.log(`THE VOICE REPORTER API listening on 0.0.0.0:${PORT} [linkedom + article cache + reactions]`)
   );
 
   refreshNews().catch(e => console.error('[boot news]', e.message));
